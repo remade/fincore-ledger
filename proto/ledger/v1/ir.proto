@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+option go_package = "github.com/remade/ledger/pkg/proto/ledger/v1;ledgerv1";
+
+import "google/protobuf/timestamp.proto";
+
+message Intent {
+  string ledger_id = 1;
+  google.protobuf.Timestamp valid_time = 2;
+  string idempotency_key = 3;
+  string reference = 4;
+  map<string, MetadataValue> metadata = 5;
+  oneof operation {
+    PostOperation post = 10;
+    AuthorizeOperation authorize = 11;
+    CaptureOperation capture = 12;
+    VoidOperation void = 13;
+    ConvertOperation convert = 14;
+    BatchOperation batch = 15;
+    RevertOperation revert = 16;
+    AmendOperation amend = 17;
+    SetMetadataOperation set_metadata = 18;
+    DeleteMetadataOperation delete_metadata = 19;
+    InsertSchemaOperation insert_schema = 20;
+  }
+  bool dry_run = 30;
+}
+
+message PostOperation {
+  repeated Posting postings = 1;
+}
+
+message Posting {
+  string source = 1;
+  string destination = 2;
+  string amount = 3;
+  string asset = 4;
+}
+
+message AuthorizeOperation {
+  string source = 1;
+  string destination_hint = 2;
+  string amount = 3;
+  string asset = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message CaptureOperation {
+  string hold_id = 1;
+  string amount = 2;
+  string destination = 3;
+}
+
+message VoidOperation {
+  string hold_id = 1;
+}
+
+message ConvertOperation {
+  string source = 1;
+  string destination = 2;
+  string source_amount = 3;
+  string source_asset = 4;
+  string destination_amount = 5;
+  string destination_asset = 6;
+  string rate = 7;
+  string rate_source = 8;
+  string slippage_account = 9;
+  string slippage_amount = 10;
+}
+
+message BatchOperation {
+  enum Mode {
+    ALL_OR_NOTHING = 0;
+    BEST_EFFORT = 1;
+    CHECKPOINTED = 2;
+  }
+  Mode mode = 1;
+  repeated Intent intents = 2;
+}
+
+message RevertOperation {
+  string original_transaction_id = 1;
+  bool force = 2;
+  bool at_effective_date = 3;
+  string reason = 4;
+}
+
+message AmendOperation {
+  string original_transaction_id = 1;
+  map<string, MetadataValue> metadata_changes = 2;
+}
+
+message SetMetadataOperation {
+  enum TargetType {
+    ACCOUNT = 0;
+    TRANSACTION = 1;
+  }
+  TargetType target_type = 1;
+  string target_id = 2;
+  map<string, MetadataValue> metadata = 3;
+}
+
+message DeleteMetadataOperation {
+  enum TargetType {
+    ACCOUNT = 0;
+    TRANSACTION = 1;
+  }
+  TargetType target_type = 1;
+  string target_id = 2;
+  string key = 3;
+}
+
+message InsertSchemaOperation {
+  bytes schema_bytes = 1;
+  string version = 2;
+}
+
+message MetadataValue {
+  oneof value {
+    string string_value = 1;
+    int64 int_value = 2;
+    bool bool_value = 3;
+    string decimal_value = 4;
+    google.protobuf.Timestamp timestamp_value = 5;
+  }
+}

@@ -1,0 +1,511 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+option go_package = "github.com/remade/ledger/pkg/proto/ledger/v1;ledgerv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/api/annotations.proto";
+import "ledger/v1/ir.proto";
+import "ledger/v1/events.proto";
+import "ledger/v1/stream.proto";
+
+service LedgerService {
+  // Ledger lifecycle
+  rpc CreateLedger(CreateLedgerRequest) returns (Ledger) {
+    option (google.api.http) = {
+      post: "/v1/ledgers"
+      body: "*"
+    };
+  }
+  rpc GetLedger(GetLedgerRequest) returns (Ledger) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{id}"
+    };
+  }
+  rpc ListLedgers(ListLedgersRequest) returns (ListLedgersResponse) {
+    option (google.api.http) = {
+      get: "/v1/ledgers"
+    };
+  }
+  rpc SealLedger(SealLedgerRequest) returns (Ledger) {
+    option (google.api.http) = {
+      post: "/v1/ledgers/{id}/seal"
+    };
+  }
+
+  // Submit operations (universal write endpoint)
+  rpc Submit(SubmitRequest) returns (SubmitResponse) {
+    option (google.api.http) = {
+      post: "/v1/ledgers/{intent.ledger_id}/submit"
+      body: "*"
+    };
+  }
+
+  // Reads
+  rpc GetTransaction(GetTransactionRequest) returns (Transaction) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/transactions/{transaction_id}"
+    };
+  }
+  rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/transactions"
+    };
+  }
+  rpc GetAccount(GetAccountRequest) returns (Account) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/accounts/{address}"
+    };
+  }
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/accounts"
+    };
+  }
+  rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/accounts/{account}/balance"
+    };
+  }
+  rpc GetAggregatedBalances(GetAggregatedBalancesRequest) returns (GetAggregatedBalancesResponse) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/aggregated-balances"
+    };
+  }
+  rpc GetHold(GetHoldRequest) returns (Hold) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/holds/{hold_id}"
+    };
+  }
+  rpc ListHolds(ListHoldsRequest) returns (ListHoldsResponse) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/holds"
+    };
+  }
+  rpc GetRelationships(GetRelationshipsRequest) returns (GetRelationshipsResponse) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/transactions/{transaction_id}/relationships"
+    };
+  }
+
+  // Log
+  rpc ListLogEvents(ListLogEventsRequest) returns (ListLogEventsResponse) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/log"
+    };
+  }
+  rpc GetLogEvent(GetLogEventRequest) returns (LogEvent) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/log/{event_id}"
+    };
+  }
+  rpc VerifyBatch(VerifyBatchRequest) returns (VerifyBatchResponse) {
+    option (google.api.http) = {
+      post: "/v1/ledgers/{ledger_id}/batches/{batch_id}/verify"
+    };
+  }
+
+  // Schemas
+  rpc InsertSchema(InsertSchemaRequest) returns (Schema) {
+    option (google.api.http) = {
+      post: "/v1/ledgers/{ledger_id}/schemas"
+      body: "*"
+    };
+  }
+  rpc GetSchema(GetSchemaRequest) returns (Schema) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/schemas/{version}"
+    };
+  }
+
+  // Approvals
+  rpc SubmitForApproval(SubmitForApprovalRequest) returns (SubmitForApprovalResponse) {
+    option (google.api.http) = {
+      post: "/v1/ledgers/{ledger_id}/approvals"
+      body: "*"
+    };
+  }
+  rpc ApproveIntent(ApproveIntentRequest) returns (ApproveIntentResponse) {
+    option (google.api.http) = {
+      post: "/v1/ledgers/{ledger_id}/approvals/{intent_id}/approve"
+      body: "*"
+    };
+  }
+  rpc ListPendingApprovals(ListPendingApprovalsRequest) returns (ListPendingApprovalsResponse) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/approvals"
+    };
+  }
+
+  // Streaming subscriptions
+  rpc Subscribe(SubscribeRequest) returns (stream SubscriptionEvent);
+
+  // Export/Import
+  rpc Export(ExportRequest) returns (stream LogEvent) {
+    option (google.api.http) = {
+      get: "/v1/ledgers/{ledger_id}/export"
+    };
+  }
+  rpc Import(stream LogEvent) returns (ImportResponse);
+}
+
+// --- Request/Response messages ---
+
+message CreateLedgerRequest {
+  string id = 1;
+  string bucket_id = 2;
+  map<string, string> metadata = 3;
+}
+
+message GetLedgerRequest {
+  string id = 1;
+}
+
+message ListLedgersRequest {
+  int32 page_size = 1;
+  string page_token = 2;
+}
+
+message ListLedgersResponse {
+  repeated Ledger ledgers = 1;
+  string next_page_token = 2;
+}
+
+message SealLedgerRequest {
+  string id = 1;
+}
+
+message SubmitRequest {
+  Intent intent = 1;
+}
+
+message SubmitResponse {
+  string event_id = 1;
+  bool idempotent_hit = 2;
+  Intent intent_echo = 3;
+  string error = 4;  // non-empty when this intent failed (batch BEST_EFFORT mode)
+  oneof output {
+    Transaction transaction = 10;
+    Hold hold = 11;
+    Capture capture = 12;
+    Conversion conversion = 13;
+    BatchResult batch_result = 14;
+    Revert revert = 15;
+    Amend amend = 16;
+  }
+}
+
+message GetTransactionRequest {
+  string ledger_id = 1;
+  string transaction_id = 2;
+  google.protobuf.Timestamp as_of_valid = 3;
+  google.protobuf.Timestamp as_of_system = 4;
+}
+
+message ListTransactionsRequest {
+  string ledger_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+  google.protobuf.Timestamp as_of_valid = 4;
+  google.protobuf.Timestamp as_of_system = 5;
+  string account = 6;
+  string reference = 7;
+  map<string, string> metadata_filter = 8;
+}
+
+message ListTransactionsResponse {
+  repeated Transaction transactions = 1;
+  string next_page_token = 2;
+}
+
+message GetAccountRequest {
+  string ledger_id = 1;
+  string address = 2;
+  google.protobuf.Timestamp as_of_valid = 3;
+  google.protobuf.Timestamp as_of_system = 4;
+}
+
+message ListAccountsRequest {
+  string ledger_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+  string address_pattern = 4;
+  map<string, string> metadata_filter = 5;
+}
+
+message ListAccountsResponse {
+  repeated Account accounts = 1;
+  string next_page_token = 2;
+}
+
+message GetBalanceRequest {
+  string ledger_id = 1;
+  string account = 2;
+  string asset = 3;
+  google.protobuf.Timestamp as_of_valid = 4;
+  google.protobuf.Timestamp as_of_system = 5;
+  bool include_holds = 6;
+}
+
+message GetBalanceResponse {
+  string posted_balance = 1;
+  string available_balance = 2;
+  string asset = 3;
+  google.protobuf.Timestamp as_of_valid = 4;
+  google.protobuf.Timestamp as_of_system = 5;
+}
+
+message GetAggregatedBalancesRequest {
+  string ledger_id = 1;
+  string address_pattern = 2;
+  google.protobuf.Timestamp as_of_valid = 3;
+  google.protobuf.Timestamp as_of_system = 4;
+}
+
+message GetAggregatedBalancesResponse {
+  map<string, string> balances = 1;
+}
+
+message GetHoldRequest {
+  string ledger_id = 1;
+  string hold_id = 2;
+}
+
+message ListHoldsRequest {
+  string ledger_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+  string account = 4;
+}
+
+message ListHoldsResponse {
+  repeated Hold holds = 1;
+  string next_page_token = 2;
+}
+
+message GetRelationshipsRequest {
+  string ledger_id = 1;
+  string transaction_id = 2;
+  int32 depth = 3;
+}
+
+message GetRelationshipsResponse {
+  repeated Relationship relationships = 1;
+}
+
+message ListLogEventsRequest {
+  string ledger_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListLogEventsResponse {
+  repeated LogEvent events = 1;
+  string next_page_token = 2;
+}
+
+message GetLogEventRequest {
+  string ledger_id = 1;
+  string event_id = 2;
+}
+
+message VerifyBatchRequest {
+  string ledger_id = 1;
+  string batch_id = 2;
+}
+
+message VerifyBatchResponse {
+  bool valid = 1;
+  string merkle_root = 2;
+  int32 event_count = 3;
+}
+
+message InsertSchemaRequest {
+  string ledger_id = 1;
+  bytes schema_bytes = 2;
+  string version = 3;
+}
+
+message GetSchemaRequest {
+  string ledger_id = 1;
+  string version = 2;
+}
+
+message ExportRequest {
+  string ledger_id = 1;
+  google.protobuf.Timestamp from = 2;
+  google.protobuf.Timestamp to = 3;
+}
+
+message ImportResponse {
+  int64 events_imported = 1;
+}
+
+// --- Domain model messages ---
+
+message Ledger {
+  string id = 1;
+  string bucket_id = 2;
+  string state = 3;
+  map<string, string> features = 4;
+  map<string, string> metadata = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp sealed_at = 7;
+  repeated string issuer_accounts = 8;
+}
+
+message Transaction {
+  string ledger_id = 1;
+  string transaction_id = 2;
+  string event_id = 3;
+  google.protobuf.Timestamp valid_time = 4;
+  google.protobuf.Timestamp system_time = 5;
+  string reference = 6;
+  repeated Posting postings = 7;
+  map<string, MetadataValue> metadata = 8;
+}
+
+message Account {
+  string ledger_id = 1;
+  string address = 2;
+  google.protobuf.Timestamp first_usage = 3;
+  google.protobuf.Timestamp updated_at = 4;
+  map<string, MetadataValue> metadata = 5;
+}
+
+message Hold {
+  string ledger_id = 1;
+  string hold_id = 2;
+  string source = 3;
+  string destination_hint = 4;
+  string asset = 5;
+  string authorized_amount = 6;
+  string captured_amount = 7;
+  bool voided = 8;
+  bool expired = 9;
+  google.protobuf.Timestamp expires_at = 10;
+  google.protobuf.Timestamp valid_time = 11;
+  google.protobuf.Timestamp system_time = 12;
+}
+
+message Capture {
+  string capture_id = 1;
+  string hold_id = 2;
+  string amount = 3;
+  string destination = 4;
+}
+
+message Conversion {
+  string conversion_id = 1;
+  string source = 2;
+  string destination = 3;
+  string source_amount = 4;
+  string source_asset = 5;
+  string destination_amount = 6;
+  string destination_asset = 7;
+  string rate = 8;
+  string rate_source = 9;
+}
+
+message BatchResult {
+  repeated SubmitResponse results = 1;
+  int32 successes = 2;
+  int32 failures = 3;
+}
+
+message Revert {
+  string original_transaction_id = 1;
+  string reverting_transaction_id = 2;
+}
+
+message Amend {
+  string original_transaction_id = 1;
+  map<string, MetadataValue> metadata_changes = 2;
+}
+
+message Schema {
+  string ledger_id = 1;
+  string version = 2;
+  bytes document = 3;
+  google.protobuf.Timestamp inserted_at = 4;
+  string event_id = 5;
+}
+
+message Relationship {
+  string parent_tx_id = 1;
+  string child_tx_id = 2;
+  RelationshipType type = 3;
+  string event_id = 4;
+  google.protobuf.Timestamp system_time = 5;
+}
+
+enum RelationshipType {
+  RELATIONSHIP_UNSPECIFIED = 0;
+  REVERTS = 1;
+  AMENDS = 2;
+  SETTLES = 3;
+  EXTENDS = 4;
+  REFERENCES = 5;
+}
+
+// --- Approval messages ---
+
+message SubmitForApprovalRequest {
+  string ledger_id = 1;
+  bytes intent_payload = 2;
+  repeated string required_approvers = 3;
+  string submitted_by = 4;
+  int64 expires_in_seconds = 5;  // 0 = default 24h
+}
+
+message SubmitForApprovalResponse {
+  string intent_id = 1;
+}
+
+message ApproveIntentRequest {
+  string ledger_id = 1;
+  string intent_id = 2;
+  string principal = 3;
+  string signature = 4;
+}
+
+message ApproveIntentResponse {
+  bool fully_approved = 1;
+  string event_id = 2;  // populated only when fully approved and executed
+  oneof output {
+    Transaction transaction = 10;
+    Hold hold = 11;
+    Capture capture = 12;
+    Conversion conversion = 13;
+  }
+}
+
+message ListPendingApprovalsRequest {
+  string ledger_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListPendingApprovalsResponse {
+  repeated PendingApproval approvals = 1;
+  string next_page_token = 2;
+}
+
+message PendingApproval {
+  string ledger_id = 1;
+  string intent_id = 2;
+  bytes intent_hash = 3;
+  repeated string required_approvers = 4;
+  repeated ApprovalEntry received_approvals = 5;
+  google.protobuf.Timestamp expires_at = 6;
+  string state = 7;
+  google.protobuf.Timestamp submitted_at = 8;
+  string submitted_by = 9;
+}
+
+message ApprovalEntry {
+  string principal = 1;
+  string signature = 2;
+  google.protobuf.Timestamp signed_at = 3;
+}

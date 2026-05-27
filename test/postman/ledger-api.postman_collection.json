@@ -1,0 +1,865 @@
+{
+	"info": {
+		"_postman_id": "ledger-api-v1",
+		"name": "Ledger API (gRPC)",
+		"description": "Postman collection for the Fincore Ledger gRPC API.\n\n## Setup\n\n1. Server runs on `localhost:9090` (gRPC) and `localhost:8080` (HTTP health)\n2. Requires PostgreSQL and Redis — use `docker-compose -f deploy/docker-compose/docker-compose.yml up`\n3. Start server: `go run ./cmd/server`\n4. Start worker: `go run ./cmd/worker`\n\n## Proto file\n\nImport `proto/ledger/v1/api.proto` into Postman for gRPC method introspection.\n\n## Workflow Order\n\nFor a full test run, execute requests in this order:\n1. Health Check\n2. Create Ledger\n3. Post Transaction (fund accounts from _world)\n4. Get Balance (verify)\n5. Then any holds, conversions, reverts, etc.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"variable": [
+		{
+			"key": "grpc_host",
+			"value": "localhost:9090",
+			"type": "string"
+		},
+		{
+			"key": "http_host",
+			"value": "http://localhost:8080",
+			"type": "string"
+		},
+		{
+			"key": "ledger_id",
+			"value": "demo-ledger",
+			"type": "string"
+		}
+	],
+	"item": [
+		{
+			"name": "Health",
+			"item": [
+				{
+					"name": "Health Check (liveness)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/healthz",
+							"host": ["{{http_host}}"],
+							"path": ["healthz"]
+						},
+						"description": "Liveness probe. Returns 200 if the server is running."
+					}
+				},
+				{
+					"name": "Ready Check (readiness)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/readyz",
+							"host": ["{{http_host}}"],
+							"path": ["readyz"]
+						},
+						"description": "Readiness probe. Returns 200 if the server can reach PostgreSQL and Redis."
+					}
+				}
+			],
+			"description": "HTTP health check endpoints (port 8080)."
+		},
+		{
+			"name": "Ledger Lifecycle",
+			"item": [
+				{
+					"name": "Create Ledger",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"id\": \"demo-ledger\",\n  \"bucket_id\": \"_default\",\n  \"metadata\": {\n    \"environment\": \"development\",\n    \"owner\": \"finops-team\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers"]
+						},
+						"description": "Creates a new ledger. The ledger ID must be unique.\n\n**gRPC method:** `ledger.v1.LedgerService/CreateLedger`\n\n**Note:** REST gateway is not wired in the current implementation. Use gRPC or grpcurl:\n```bash\ngrpcurl -plaintext -d '{\n  \"id\": \"demo-ledger\",\n  \"bucket_id\": \"_default\",\n  \"metadata\": {\"environment\": \"development\"}\n}' localhost:9090 ledger.v1.LedgerService/CreateLedger\n```"
+					}
+				},
+				{
+					"name": "Get Ledger",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}"]
+						},
+						"description": "Retrieves a ledger by ID.\n\n**gRPC method:** `ledger.v1.LedgerService/GetLedger`\n\n```bash\ngrpcurl -plaintext -d '{\"id\": \"demo-ledger\"}' localhost:9090 ledger.v1.LedgerService/GetLedger\n```"
+					}
+				},
+				{
+					"name": "List Ledgers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers?page_size=10",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers"],
+							"query": [
+								{"key": "page_size", "value": "10"}
+							]
+						},
+						"description": "Lists all ledgers with pagination.\n\n**gRPC method:** `ledger.v1.LedgerService/ListLedgers`\n\n```bash\ngrpcurl -plaintext -d '{\"page_size\": 10}' localhost:9090 ledger.v1.LedgerService/ListLedgers\n```"
+					}
+				},
+				{
+					"name": "Seal Ledger",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/seal",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "seal"]
+						},
+						"description": "Seals a ledger, preventing any future write operations.\n\n**gRPC method:** `ledger.v1.LedgerService/SealLedger`\n\n```bash\ngrpcurl -plaintext -d '{\"id\": \"demo-ledger\"}' localhost:9090 ledger.v1.LedgerService/SealLedger\n```"
+					}
+				}
+			],
+			"description": "Ledger CRUD operations."
+		},
+		{
+			"name": "Transactions",
+			"item": [
+				{
+					"name": "Post Transaction (simple)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"reference\": \"fund-user-001\",\n    \"idempotency_key\": \"ik-fund-001\",\n    \"operation\": {\n      \"post\": {\n        \"postings\": [\n          {\n            \"source\": \"_world\",\n            \"destination\": \"users:001:wallet\",\n            \"amount\": \"10000\",\n            \"asset\": \"USD/2\"\n          }\n        ]\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Posts a simple transaction: issue 100.00 USD from _world to user wallet.\n\nAmount `10000` with asset `USD/2` means 100.00 USD (2 decimal places).\n\n**gRPC method:** `ledger.v1.LedgerService/Submit`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"reference\": \"fund-user-001\",\n    \"idempotency_key\": \"ik-fund-001\",\n    \"post\": {\n      \"postings\": [{\n        \"source\": \"_world\",\n        \"destination\": \"users:001:wallet\",\n        \"amount\": \"10000\",\n        \"asset\": \"USD/2\"\n      }]\n    }\n  }\n}' localhost:9090 ledger.v1.LedgerService/Submit\n```"
+					}
+				},
+				{
+					"name": "Post Transaction (multi-posting)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"reference\": \"payment-001\",\n    \"idempotency_key\": \"ik-payment-001\",\n    \"operation\": {\n      \"post\": {\n        \"postings\": [\n          {\n            \"source\": \"users:001:wallet\",\n            \"destination\": \"merchants:shop42\",\n            \"amount\": \"5000\",\n            \"asset\": \"USD/2\"\n          },\n          {\n            \"source\": \"users:001:wallet\",\n            \"destination\": \"fees:platform\",\n            \"amount\": \"150\",\n            \"asset\": \"USD/2\"\n          }\n        ]\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Posts a multi-posting transaction: user pays 50.00 USD to merchant + 1.50 USD platform fee.\n\nBoth postings are atomic - either all succeed or none.\n\n**gRPC:** `ledger.v1.LedgerService/Submit`"
+					}
+				},
+				{
+					"name": "Post Transaction (with metadata)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"reference\": \"transfer-001\",\n    \"metadata\": {\n      \"description\": {\"string_value\": \"Monthly subscription payment\"},\n      \"invoice_id\": {\"string_value\": \"INV-2024-0042\"},\n      \"amount_usd\": {\"decimal_value\": \"25.00\"},\n      \"recurring\": {\"bool_value\": true}\n    },\n    \"operation\": {\n      \"post\": {\n        \"postings\": [\n          {\n            \"source\": \"users:001:wallet\",\n            \"destination\": \"merchants:streaming-co\",\n            \"amount\": \"2500\",\n            \"asset\": \"USD/2\"\n          }\n        ]\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Posts a transaction with typed metadata (string, decimal, bool).\n\n**gRPC:** `ledger.v1.LedgerService/Submit`"
+					}
+				},
+				{
+					"name": "Post Transaction (idempotency retry)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"reference\": \"fund-user-001\",\n    \"idempotency_key\": \"ik-fund-001\",\n    \"operation\": {\n      \"post\": {\n        \"postings\": [\n          {\n            \"source\": \"_world\",\n            \"destination\": \"users:001:wallet\",\n            \"amount\": \"10000\",\n            \"asset\": \"USD/2\"\n          }\n        ]\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Replays the same transaction with the same idempotency key.\n\nExpected: same response as original, with `idempotent_hit: true`. No duplicate state change.\n\n**gRPC:** `ledger.v1.LedgerService/Submit`"
+					}
+				},
+				{
+					"name": "Post Transaction (dry run)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"dry_run\": true,\n    \"operation\": {\n      \"post\": {\n        \"postings\": [\n          {\n            \"source\": \"users:001:wallet\",\n            \"destination\": \"users:002:wallet\",\n            \"amount\": \"99999999\",\n            \"asset\": \"USD/2\"\n          }\n        ]\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Validates a transaction without committing. Useful for balance checks.\n\nExpected: returns validation result (ErrInsufficientFunds if balance too low) but no log event or projection changes.\n\n**gRPC:** `ledger.v1.LedgerService/Submit`"
+					}
+				},
+				{
+					"name": "Post Transaction (insufficient funds - expect error)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"post\": {\n        \"postings\": [\n          {\n            \"source\": \"users:empty-account\",\n            \"destination\": \"users:002:wallet\",\n            \"amount\": \"1\",\n            \"asset\": \"USD/2\"\n          }\n        ]\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Attempts to send from an unfunded account.\n\nExpected: gRPC `FAILED_PRECONDITION` / HTTP 400 with `ErrInsufficientFunds`.\n\n**gRPC:** `ledger.v1.LedgerService/Submit`"
+					}
+				},
+				{
+					"name": "Get Transaction",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/transactions/{{transaction_id}}",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "transactions", "{{transaction_id}}"]
+						},
+						"description": "Retrieves a transaction by ID. Replace `{{transaction_id}}` with the `transaction_id` from a Submit response.\n\n**gRPC method:** `ledger.v1.LedgerService/GetTransaction`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"ledger_id\": \"demo-ledger\",\n  \"transaction_id\": \"<ULID>\"\n}' localhost:9090 ledger.v1.LedgerService/GetTransaction\n```"
+					}
+				},
+				{
+					"name": "List Transactions",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/transactions?page_size=20",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "transactions"],
+							"query": [
+								{"key": "page_size", "value": "20"}
+							]
+						},
+						"description": "Lists transactions with pagination.\n\n**Note:** Filters (account, reference, metadata_filter, as_of_valid, as_of_system) are defined in the proto but NOT implemented in the current store layer.\n\n**gRPC:** `ledger.v1.LedgerService/ListTransactions`\n\n```bash\ngrpcurl -plaintext -d '{\"ledger_id\": \"demo-ledger\", \"page_size\": 20}' localhost:9090 ledger.v1.LedgerService/ListTransactions\n```"
+					}
+				}
+			],
+			"description": "Transaction submission and query operations."
+		},
+		{
+			"name": "Accounts & Balances",
+			"item": [
+				{
+					"name": "Get Account",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/accounts/users:001:wallet",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "accounts", "users:001:wallet"]
+						},
+						"description": "Retrieves an account by address. Accounts are lazily created on first use.\n\n**gRPC:** `ledger.v1.LedgerService/GetAccount`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"ledger_id\": \"demo-ledger\",\n  \"address\": \"users:001:wallet\"\n}' localhost:9090 ledger.v1.LedgerService/GetAccount\n```"
+					}
+				},
+				{
+					"name": "List Accounts",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/accounts?page_size=20",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "accounts"],
+							"query": [
+								{"key": "page_size", "value": "20"}
+							]
+						},
+						"description": "Lists all accounts in the ledger.\n\n**Note:** Filters (address_pattern, metadata_filter) are defined in the proto but NOT implemented in the store.\n\n**gRPC:** `ledger.v1.LedgerService/ListAccounts`"
+					}
+				},
+				{
+					"name": "Get Balance",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/accounts/users:001:wallet/balance?asset=USD/2",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "accounts", "users:001:wallet", "balance"],
+							"query": [
+								{"key": "asset", "value": "USD/2"},
+								{"key": "include_holds", "value": "true"}
+							]
+						},
+						"description": "Gets the balance of an account for a specific asset.\n\nReturns `posted_balance` (sum of all settled postings) and `available_balance` (posted minus active holds).\n\n**Note:** `available_balance` is NOT populated in the current implementation.\n\nSupports bitemporal queries with `as_of_valid` and `as_of_system` timestamps.\n\n**gRPC:** `ledger.v1.LedgerService/GetBalance`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"ledger_id\": \"demo-ledger\",\n  \"account\": \"users:001:wallet\",\n  \"asset\": \"USD/2\",\n  \"include_holds\": true\n}' localhost:9090 ledger.v1.LedgerService/GetBalance\n```"
+					}
+				},
+				{
+					"name": "Get Balance (bitemporal - AS OF)",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/accounts/users:001:wallet/balance?asset=USD/2&as_of_valid=2024-01-01T00:00:00Z",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "accounts", "users:001:wallet", "balance"],
+							"query": [
+								{"key": "asset", "value": "USD/2"},
+								{"key": "as_of_valid", "value": "2024-01-01T00:00:00Z"}
+							]
+						},
+						"description": "Gets the balance as it was known at a specific business time (valid_time).\n\nUseful for time-travel queries and reconciliation.\n\n**gRPC:** `ledger.v1.LedgerService/GetBalance`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"ledger_id\": \"demo-ledger\",\n  \"account\": \"users:001:wallet\",\n  \"asset\": \"USD/2\",\n  \"as_of_valid\": \"2024-01-01T00:00:00Z\"\n}' localhost:9090 ledger.v1.LedgerService/GetBalance\n```"
+					}
+				},
+				{
+					"name": "Set Account Metadata",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"set_metadata\": {\n        \"target_type\": \"ACCOUNT\",\n        \"target_id\": \"users:001:wallet\",\n        \"metadata\": {\n          \"display_name\": {\"string_value\": \"Alice Doe\"},\n          \"tier\": {\"string_value\": \"premium\"},\n          \"kyc_verified\": {\"bool_value\": true}\n        }\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Sets metadata on an account. Creates the account if it doesn't exist.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `SetMetadataOperation`"
+					}
+				},
+				{
+					"name": "Delete Account Metadata",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"delete_metadata\": {\n        \"target_type\": \"ACCOUNT\",\n        \"target_id\": \"users:001:wallet\",\n        \"key\": \"tier\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Deletes a metadata key from an account.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `DeleteMetadataOperation`"
+					}
+				}
+			],
+			"description": "Account and balance operations."
+		},
+		{
+			"name": "Holds (Authorization/Capture)",
+			"item": [
+				{
+					"name": "Authorize Hold",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"idempotency_key\": \"ik-auth-001\",\n    \"operation\": {\n      \"authorize\": {\n        \"source\": \"users:001:wallet\",\n        \"destination_hint\": \"merchants:shop42\",\n        \"amount\": \"2500\",\n        \"asset\": \"USD/2\",\n        \"expires_at\": \"2025-12-31T23:59:59Z\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Creates a hold (authorization) on a source account.\n\nReserves 25.00 USD from the user's wallet. The funds are no longer available for other transactions but are not yet transferred.\n\nThe hold has an expiry time — if not captured or voided before expiry, the worker will automatically expire it.\n\n**Response:** Returns a `Hold` object with `hold_id` needed for capture/void.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `AuthorizeOperation`"
+					}
+				},
+				{
+					"name": "Capture (partial)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"capture\": {\n        \"hold_id\": \"<HOLD_ID_FROM_AUTHORIZE>\",\n        \"amount\": \"1500\",\n        \"destination\": \"merchants:shop42\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Partially captures a hold. Settles 15.00 USD of the 25.00 USD authorization.\n\nMultiple partial captures are supported (up to the authorized total).\n\nReplace `<HOLD_ID_FROM_AUTHORIZE>` with the `hold_id` from the Authorize response.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `CaptureOperation`"
+					}
+				},
+				{
+					"name": "Capture (full remaining)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"capture\": {\n        \"hold_id\": \"<HOLD_ID_FROM_AUTHORIZE>\",\n        \"amount\": \"1000\",\n        \"destination\": \"merchants:shop42\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Captures the remaining 10.00 USD from the hold.\n\nAfter this, the hold is fully captured (captured_amount == authorized_amount).\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `CaptureOperation`"
+					}
+				},
+				{
+					"name": "Void Hold",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"void\": {\n        \"hold_id\": \"<HOLD_ID_FROM_AUTHORIZE>\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Voids (cancels) a hold, releasing the reserved funds.\n\nAlready-captured amounts stay captured; only the uncaptured remainder is released.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `VoidOperation`"
+					}
+				},
+				{
+					"name": "Get Hold",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/holds/{{hold_id}}",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "holds", "{{hold_id}}"]
+						},
+						"description": "Retrieves a hold by ID.\n\n**gRPC:** `ledger.v1.LedgerService/GetHold`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"ledger_id\": \"demo-ledger\",\n  \"hold_id\": \"<HOLD_ID>\"\n}' localhost:9090 ledger.v1.LedgerService/GetHold\n```"
+					}
+				},
+				{
+					"name": "List Holds",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/holds?page_size=20",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "holds"],
+							"query": [
+								{"key": "page_size", "value": "20"}
+							]
+						},
+						"description": "Lists all holds for a ledger.\n\n**Note:** The `account` filter parameter is defined in the proto but NOT implemented in the store.\n\n**gRPC:** `ledger.v1.LedgerService/ListHolds`"
+					}
+				}
+			],
+			"description": "Authorization/capture workflow (two-phase payments)."
+		},
+		{
+			"name": "FX Conversions",
+			"item": [
+				{
+					"name": "Convert (FX)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"reference\": \"fx-convert-001\",\n    \"operation\": {\n      \"convert\": {\n        \"source\": \"users:001:wallet\",\n        \"destination\": \"users:001:wallet-eur\",\n        \"source_amount\": \"1000\",\n        \"source_asset\": \"USD/2\",\n        \"destination_amount\": \"920\",\n        \"destination_asset\": \"EUR/2\",\n        \"rate\": \"0.92\",\n        \"rate_source\": \"ecb-daily-fix\",\n        \"slippage_account\": \"fees:fx-spread\",\n        \"slippage_amount\": \"50\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Performs an FX conversion:\n- Debits 10.00 USD from user's USD wallet\n- Credits 9.20 EUR to user's EUR wallet\n- Credits 0.50 USD slippage to fees account\n\nRate and rate_source are recorded for audit.\n\n**Note:** Conversions do not create a queryable transaction record (known gap).\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `ConvertOperation`"
+					}
+				}
+			],
+			"description": "Foreign exchange conversion operations."
+		},
+		{
+			"name": "Reverts & Amends",
+			"item": [
+				{
+					"name": "Revert Transaction",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"revert\": {\n        \"original_transaction_id\": \"<TRANSACTION_ID>\",\n        \"reason\": \"Customer refund request\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Reverts a transaction by creating inverse postings.\n\nWill fail if reversal would leave any non-issuer account with a negative balance. Use `force: true` to override.\n\nCreates a `REVERTS` relationship between the original and reverting transactions.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `RevertOperation`"
+					}
+				},
+				{
+					"name": "Revert Transaction (force)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"revert\": {\n        \"original_transaction_id\": \"<TRANSACTION_ID>\",\n        \"force\": true,\n        \"reason\": \"Fraud reversal - override balance check\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Force-reverts a transaction, bypassing the balance check.\n\nMay leave accounts with negative balances.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `RevertOperation`"
+					}
+				},
+				{
+					"name": "Revert Transaction (at effective date)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"revert\": {\n        \"original_transaction_id\": \"<TRANSACTION_ID>\",\n        \"at_effective_date\": true,\n        \"reason\": \"Backdated correction\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Reverts using the original transaction's valid_time (business date), not the current time.\n\nUseful for backdated corrections in financial reporting.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `RevertOperation`"
+					}
+				},
+				{
+					"name": "Amend Transaction (metadata only)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"amend\": {\n        \"original_transaction_id\": \"<TRANSACTION_ID>\",\n        \"metadata_changes\": {\n          \"correction_reason\": {\"string_value\": \"Incorrect invoice number\"},\n          \"invoice_id\": {\"string_value\": \"INV-2024-0043\"}\n        }\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Amends a transaction's metadata. Postings cannot be amended (use revert + re-post instead).\n\nOriginal metadata is preserved in the metadata_history table. Creates an `AMENDS` relationship.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `AmendOperation`"
+					}
+				},
+				{
+					"name": "Get Relationships",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/transactions/{{transaction_id}}/relationships?depth=3",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "transactions", "{{transaction_id}}", "relationships"],
+							"query": [
+								{"key": "depth", "value": "3"}
+							]
+						},
+						"description": "Gets transaction relationships (reverts, amends, settles, etc.).\n\nWalks the relationship graph up to `depth` levels using a recursive CTE.\n\n**gRPC:** `ledger.v1.LedgerService/GetRelationships`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"ledger_id\": \"demo-ledger\",\n  \"transaction_id\": \"<TX_ID>\",\n  \"depth\": 3\n}' localhost:9090 ledger.v1.LedgerService/GetRelationships\n```"
+					}
+				}
+			],
+			"description": "Transaction revert and amend operations."
+		},
+		{
+			"name": "Batch Operations",
+			"item": [
+				{
+					"name": "Batch (ALL_OR_NOTHING)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"batch\": {\n        \"mode\": \"ALL_OR_NOTHING\",\n        \"intents\": [\n          {\n            \"ledger_id\": \"demo-ledger\",\n            \"post\": {\n              \"postings\": [{\n                \"source\": \"_world\",\n                \"destination\": \"payroll:checking\",\n                \"amount\": \"500000\",\n                \"asset\": \"USD/2\"\n              }]\n            }\n          },\n          {\n            \"ledger_id\": \"demo-ledger\",\n            \"post\": {\n              \"postings\": [{\n                \"source\": \"payroll:checking\",\n                \"destination\": \"employees:alice\",\n                \"amount\": \"250000\",\n                \"asset\": \"USD/2\"\n              }]\n            }\n          },\n          {\n            \"ledger_id\": \"demo-ledger\",\n            \"post\": {\n              \"postings\": [{\n                \"source\": \"payroll:checking\",\n                \"destination\": \"employees:bob\",\n                \"amount\": \"250000\",\n                \"asset\": \"USD/2\"\n              }]\n            }\n          }\n        ]\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Submits a batch of transactions in ALL_OR_NOTHING mode.\n\nFunds payroll account from _world, then distributes to employees.\n\n**Known bug:** ALL_OR_NOTHING mode is NOT truly atomic — each intent commits independently. If intent 3 fails, intents 1-2 are already committed.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `BatchOperation`"
+					}
+				},
+				{
+					"name": "Batch (BEST_EFFORT)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"batch\": {\n        \"mode\": \"BEST_EFFORT\",\n        \"intents\": [\n          {\n            \"ledger_id\": \"demo-ledger\",\n            \"post\": {\n              \"postings\": [{\n                \"source\": \"_world\",\n                \"destination\": \"rewards:pool\",\n                \"amount\": \"100\",\n                \"asset\": \"USD/2\"\n              }]\n            }\n          },\n          {\n            \"ledger_id\": \"demo-ledger\",\n            \"post\": {\n              \"postings\": [{\n                \"source\": \"empty-account-will-fail\",\n                \"destination\": \"rewards:pool\",\n                \"amount\": \"999999\",\n                \"asset\": \"USD/2\"\n              }]\n            }\n          }\n        ]\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Submits a batch in BEST_EFFORT mode — continues on failures.\n\nIntent 1 should succeed (issuing from _world), intent 2 should fail (insufficient funds).\n\nResponse includes per-intent results with `successes` and `failures` counts.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `BatchOperation`"
+					}
+				}
+			],
+			"description": "Batch operations with ALL_OR_NOTHING and BEST_EFFORT modes."
+		},
+		{
+			"name": "Log & Verification",
+			"item": [
+				{
+					"name": "List Log Events",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/log?page_size=50",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "log"],
+							"query": [
+								{"key": "page_size", "value": "50"}
+							]
+						},
+						"description": "Lists all log events for a ledger. The log is the canonical source of truth — all state changes are immutable events.\n\nEvent types: TRANSACTION_POSTED, HOLD_AUTHORIZED, HOLD_CAPTURED, HOLD_VOIDED, HOLD_EXPIRED, CONVERSION_RECORDED, TRANSACTION_REVERTED, TRANSACTION_AMENDED, METADATA_SET, METADATA_DELETED, SCHEMA_INSERTED.\n\n**gRPC:** `ledger.v1.LedgerService/ListLogEvents`"
+					}
+				},
+				{
+					"name": "Get Log Event",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/log/{{event_id}}",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "log", "{{event_id}}"]
+						},
+						"description": "Retrieves a specific log event by ID (ULID).\n\n**gRPC:** `ledger.v1.LedgerService/GetLogEvent`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"ledger_id\": \"demo-ledger\",\n  \"event_id\": \"<EVENT_ULID>\"\n}' localhost:9090 ledger.v1.LedgerService/GetLogEvent\n```"
+					}
+				},
+				{
+					"name": "Verify Batch (Merkle)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"ledger_id\": \"demo-ledger\",\n  \"batch_id\": \"<BATCH_ID>\"\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/batches/{{batch_id}}/verify",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "batches", "{{batch_id}}", "verify"]
+						},
+						"description": "Verifies a Merkle batch by recomputing the root from leaf events and comparing against the stored root.\n\nReturns `valid: true/false`, `merkle_root` (hex), and `event_count`.\n\n**gRPC:** `ledger.v1.LedgerService/VerifyBatch`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"ledger_id\": \"demo-ledger\",\n  \"batch_id\": \"<BATCH_ID>\"\n}' localhost:9090 ledger.v1.LedgerService/VerifyBatch\n```"
+					}
+				}
+			],
+			"description": "Event log and Merkle verification."
+		},
+		{
+			"name": "Schemas",
+			"item": [
+				{
+					"name": "Insert Schema (Chart of Accounts)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{"key": "Content-Type", "value": "application/json"}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"insert_schema\": {\n        \"version\": \"v1\",\n        \"schema_bytes\": \"eyJhY2NvdW50cyI6eyJ1c2VycyI6eyIkdXNlcl9pZCI6eyJ3YWxsZXQiOnsiLnNlbGYiOnt9fX19fSwiX3dvcmxkIjp7Ii5zZWxmIjp7fX0sIm1lcmNoYW50cyI6eyIkbWVyY2hhbnRfaWQiOnsiLnNlbGYiOnt9fX0sImZlZXMiOnsiJGZlZV90eXBlIjp7Ii5zZWxmIjp7fX19fX0=\"\n      }\n    }\n  }\n}"
+						},
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+						},
+						"description": "Inserts a Chart of Accounts schema.\n\nThe schema_bytes field is a base64-encoded JSON document defining valid account paths:\n```json\n{\n  \"accounts\": {\n    \"users\": { \"$user_id\": { \"wallet\": { \".self\": {} } } },\n    \"_world\": { \".self\": {} },\n    \"merchants\": { \"$merchant_id\": { \".self\": {} } },\n    \"fees\": { \"$fee_type\": { \".self\": {} } }\n  }\n}\n```\n\nWhen schema_enforcement is `strict`, postings must match this chart.\n\n**gRPC:** `ledger.v1.LedgerService/Submit` with `InsertSchemaOperation`"
+					}
+				},
+				{
+					"name": "Get Schema",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/schemas/v1",
+							"host": ["{{http_host}}"],
+							"path": ["v1", "ledgers", "{{ledger_id}}", "schemas", "v1"]
+						},
+						"description": "Retrieves a schema by version.\n\n**gRPC:** `ledger.v1.LedgerService/GetSchema`\n\n```bash\ngrpcurl -plaintext -d '{\n  \"ledger_id\": \"demo-ledger\",\n  \"version\": \"v1\"\n}' localhost:9090 ledger.v1.LedgerService/GetSchema\n```"
+					}
+				}
+			],
+			"description": "Chart of Accounts schema management."
+		},
+		{
+			"name": "Scenarios (End-to-End)",
+			"item": [
+				{
+					"name": "Scenario: E-Commerce Payment Flow",
+					"item": [
+						{
+							"name": "1. Fund merchant escrow from world",
+							"request": {
+								"method": "POST",
+								"header": [{"key": "Content-Type", "value": "application/json"}],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"reference\": \"ecom-fund-buyer\",\n    \"idempotency_key\": \"ik-ecom-fund\",\n    \"operation\": {\n      \"post\": {\n        \"postings\": [{\n          \"source\": \"_world\",\n          \"destination\": \"users:buyer42:wallet\",\n          \"amount\": \"50000\",\n          \"asset\": \"USD/2\"\n        }]\n      }\n    }\n  }\n}"
+								},
+								"url": {
+									"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+									"host": ["{{http_host}}"],
+									"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+								},
+								"description": "Step 1: Fund the buyer's wallet with 500.00 USD."
+							}
+						},
+						{
+							"name": "2. Authorize payment hold",
+							"request": {
+								"method": "POST",
+								"header": [{"key": "Content-Type", "value": "application/json"}],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"idempotency_key\": \"ik-ecom-auth\",\n    \"operation\": {\n      \"authorize\": {\n        \"source\": \"users:buyer42:wallet\",\n        \"destination_hint\": \"merchants:seller99\",\n        \"amount\": \"15000\",\n        \"asset\": \"USD/2\",\n        \"expires_at\": \"2025-12-31T23:59:59Z\"\n      }\n    }\n  }\n}"
+								},
+								"url": {
+									"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+									"host": ["{{http_host}}"],
+									"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+								},
+								"description": "Step 2: Authorize a 150.00 USD hold for the purchase. Save the hold_id from the response."
+							}
+						},
+						{
+							"name": "3. Check available balance",
+							"request": {
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/accounts/users:buyer42:wallet/balance?asset=USD/2&include_holds=true",
+									"host": ["{{http_host}}"],
+									"path": ["v1", "ledgers", "{{ledger_id}}", "accounts", "users:buyer42:wallet", "balance"],
+									"query": [
+										{"key": "asset", "value": "USD/2"},
+										{"key": "include_holds", "value": "true"}
+									]
+								},
+								"description": "Step 3: Verify available balance reflects the hold.\n\nExpected: posted_balance=50000, available_balance=35000 (500 - 150)."
+							}
+						},
+						{
+							"name": "4. Capture payment (ship order)",
+							"request": {
+								"method": "POST",
+								"header": [{"key": "Content-Type", "value": "application/json"}],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"capture\": {\n        \"hold_id\": \"<HOLD_ID>\",\n        \"amount\": \"14500\",\n        \"destination\": \"merchants:seller99\"\n      }\n    }\n  }\n}"
+								},
+								"url": {
+									"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+									"host": ["{{http_host}}"],
+									"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+								},
+								"description": "Step 4: Order shipped — capture 145.00 USD (partial, slightly less than auth due to discount)."
+							}
+						},
+						{
+							"name": "5. Void remaining hold",
+							"request": {
+								"method": "POST",
+								"header": [{"key": "Content-Type", "value": "application/json"}],
+								"body": {
+									"mode": "raw",
+									"raw": "{\n  \"intent\": {\n    \"ledger_id\": \"demo-ledger\",\n    \"operation\": {\n      \"void\": {\n        \"hold_id\": \"<HOLD_ID>\"\n      }\n    }\n  }\n}"
+								},
+								"url": {
+									"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/submit",
+									"host": ["{{http_host}}"],
+									"path": ["v1", "ledgers", "{{ledger_id}}", "submit"]
+								},
+								"description": "Step 5: Release the remaining 5.00 USD hold (discount applied)."
+							}
+						},
+						{
+							"name": "6. Verify final balances",
+							"request": {
+								"method": "GET",
+								"header": [],
+								"url": {
+									"raw": "{{http_host}}/v1/ledgers/{{ledger_id}}/accounts/users:buyer42:wallet/balance?asset=USD/2",
+									"host": ["{{http_host}}"],
+									"path": ["v1", "ledgers", "{{ledger_id}}", "accounts", "users:buyer42:wallet", "balance"],
+									"query": [
+										{"key": "asset", "value": "USD/2"}
+									]
+								},
+								"description": "Step 6: Verify buyer's final balance.\n\nExpected: posted_balance = 35500 (500.00 - 145.00 = 355.00 USD)."
+							}
+						}
+					],
+					"description": "Complete e-commerce payment flow: fund -> authorize -> check balance -> capture -> void remainder -> verify."
+				}
+			],
+			"description": "End-to-end scenario walkthroughs."
+		}
+	]
+}

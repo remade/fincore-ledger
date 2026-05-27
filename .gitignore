@@ -1,0 +1,9 @@
+.claude
+bin/
+tmp/
+*.exe
+*.test
+*.out
+.env
+.DS_Store
+.plans

@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+option go_package = "github.com/remade/ledger/pkg/proto/ledger/v1;ledgerv1";
+
+import "ledger/v1/events.proto";
+
+message SubscribeRequest {
+  string ledger_id = 1;
+  repeated string account_patterns = 2;
+  repeated EventType types = 3;
+  string from_event_id = 4;
+  bool include_historical = 5;
+}
+
+message SubscriptionEvent {
+  LogEvent event = 1;
+  bool is_replay = 2;
+}

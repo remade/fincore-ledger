@@ -1,0 +1,128 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+option go_package = "github.com/remade/ledger/pkg/proto/ledger/v1;ledgerv1";
+
+import "google/protobuf/timestamp.proto";
+import "ledger/v1/ir.proto";
+
+message LogEvent {
+  string event_id = 1;
+  string ledger_id = 2;
+  uint64 ledger_seq = 3;
+  google.protobuf.Timestamp system_time = 4;
+  google.protobuf.Timestamp valid_time = 5;
+  string idempotency_key = 6;
+  string idempotency_hash = 7;
+  string batch_id = 8;
+  bytes payload = 9;
+  EventType type = 10;
+  uint64 schema_version = 11;
+}
+
+enum EventType {
+  EVENT_UNSPECIFIED = 0;
+  TRANSACTION_POSTED = 1;
+  HOLD_AUTHORIZED = 2;
+  HOLD_CAPTURED = 3;
+  HOLD_VOIDED = 4;
+  HOLD_EXPIRED = 5;
+  CONVERSION_RECORDED = 6;
+  TRANSACTION_REVERTED = 7;
+  TRANSACTION_AMENDED = 8;
+  METADATA_SET = 9;
+  METADATA_DELETED = 10;
+  SCHEMA_INSERTED = 11;
+  POLICY_DENIAL = 12;
+  APPROVAL_RECORDED = 13;
+}
+
+// Typed payload schemas — one per event type.
+
+message TransactionPostedPayload {
+  string transaction_id = 1;
+  repeated Posting postings = 2;
+  map<string, MetadataValue> metadata = 3;
+  string reference = 4;
+}
+
+message HoldAuthorizedPayload {
+  string hold_id = 1;
+  string source = 2;
+  string destination_hint = 3;
+  string amount = 4;
+  string asset = 5;
+  google.protobuf.Timestamp expires_at = 6;
+}
+
+message HoldCapturedPayload {
+  string capture_id = 1;
+  string hold_id = 2;
+  string amount = 3;
+  string destination = 4;
+}
+
+message HoldVoidedPayload {
+  string hold_id = 1;
+  string reason = 2;
+}
+
+message HoldExpiredPayload {
+  string hold_id = 1;
+}
+
+message ConversionRecordedPayload {
+  string conversion_id = 1;
+  string source = 2;
+  string destination = 3;
+  string source_amount = 4;
+  string source_asset = 5;
+  string destination_amount = 6;
+  string destination_asset = 7;
+  string rate = 8;
+  string rate_source = 9;
+  string slippage_account = 10;
+  string slippage_amount = 11;
+}
+
+message TransactionRevertedPayload {
+  string original_transaction_id = 1;
+  string reverting_transaction_id = 2;
+  string reason = 3;
+  bool force = 4;
+}
+
+message TransactionAmendedPayload {
+  string original_transaction_id = 1;
+  map<string, MetadataValue> metadata_changes = 2;
+}
+
+message MetadataSetPayload {
+  string target_type = 1;
+  string target_id = 2;
+  map<string, MetadataValue> metadata = 3;
+}
+
+message MetadataDeletedPayload {
+  string target_type = 1;
+  string target_id = 2;
+  string key = 3;
+}
+
+message SchemaInsertedPayload {
+  string version = 1;
+  bytes schema_bytes = 2;
+}
+
+message PolicyDenialPayload {
+  string principal = 1;
+  string intent_hash = 2;
+  string reason = 3;
+}
+
+message ApprovalRecordedPayload {
+  string intent_id = 1;
+  string principal = 2;
+  string signature = 3;
+}

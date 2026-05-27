@@ -1,0 +1,977 @@
+package planner
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"math/big"
+	"time"
+
+	"github.com/oklog/ulid/v2"
+
+	"github.com/remade/ledger/internal/storage"
+	"github.com/remade/ledger/pkg/accounts"
+)
+
+// BatchIntent represents a single intent within a batch.
+type BatchIntent struct {
+	Type           string
+	Postings       []PostingInput
+	Reference      string
+	Metadata       map[string]any
+	IdempotencyKey string
+
+	// Authorize fields.
+	Source          string
+	DestinationHint string
+	Asset           string
+	Amount          *big.Int
+	ExpiresAt       time.Time
+
+	// Capture fields.
+	HoldID      string
+	Destination string
+
+	// Revert/amend fields.
+	OriginalTxID    string
+	Force           bool
+	AtEffectiveDate bool
+	Reason          string
+
+	// Convert fields.
+	ConvertParams *ConvertParams
+
+	// Metadata operation fields.
+	TargetType  int16
+	TargetID    string
+	MetadataKey string
+}
+
+// BatchIntentResult is the result of a single intent within a batch.
+type BatchIntentResult struct {
+	EventID string
+	Success bool
+	Error   string
+}
+
+// BatchResult is the output of a batch operation.
+type BatchResult struct {
+	Results   []BatchIntentResult
+	Successes int
+	Failures  int
+	Failed    bool
+	FailedAt  int
+	Error     string
+}
+
+// SubmitBatch processes a batch of intents with the given mode.
+func (p *Planner) SubmitBatch(ctx context.Context, ledgerID string, intents []BatchIntent, mode string) (*BatchResult, error) {
+	if _, err := p.checkLedgerNotSealed(ctx, ledgerID); err != nil {
+		return nil, err
+	}
+
+	results := make([]BatchIntentResult, len(intents))
+
+	switch mode {
+	case "ALL_OR_NOTHING":
+		// True atomic execution: all intents run inside a single database
+		// transaction. If any fails, the entire batch is rolled back.
+		txStore, err := p.store.BeginTx(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("beginning batch tx: %w", err)
+		}
+		defer txStore.Rollback()
+
+		for i, intent := range intents {
+			result, err := p.executeIntentInTx(ctx, txStore, ledgerID, intent)
+			if err != nil {
+				return &BatchResult{
+					Results:  results,
+					Failed:   true,
+					FailedAt: i,
+					Error:    err.Error(),
+				}, err
+			}
+			results[i] = BatchIntentResult{EventID: result.EventID, Success: true}
+		}
+
+		if err := txStore.Commit(); err != nil {
+			return nil, fmt.Errorf("committing batch: %w", err)
+		}
+		return &BatchResult{Results: results, Successes: len(intents)}, nil
+
+	case "BEST_EFFORT":
+		var successes, failures int
+		for i, intent := range intents {
+			result, err := p.executeIntent(ctx, ledgerID, intent)
+			if err != nil {
+				results[i] = BatchIntentResult{Success: false, Error: err.Error()}
+				failures++
+			} else {
+				results[i] = BatchIntentResult{EventID: result.EventID, Success: true}
+				successes++
+			}
+		}
+		return &BatchResult{Results: results, Successes: successes, Failures: failures}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported batch mode: %s", mode)
+	}
+}
+
+func (p *Planner) executeIntent(ctx context.Context, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	switch intent.Type {
+	case "post":
+		return p.SubmitPost(ctx, ledgerID, intent.Postings, intent.Reference, intent.Metadata, intent.IdempotencyKey, nil, false)
+	case "authorize":
+		return p.SubmitAuthorize(ctx, ledgerID, intent.Source, intent.DestinationHint, intent.Asset, intent.Amount, intent.ExpiresAt, intent.IdempotencyKey)
+	case "capture":
+		return p.SubmitCapture(ctx, ledgerID, intent.HoldID, intent.Amount, intent.Destination, intent.IdempotencyKey)
+	case "void":
+		return p.SubmitVoid(ctx, ledgerID, intent.HoldID, intent.IdempotencyKey)
+	case "revert":
+		return p.SubmitRevert(ctx, ledgerID, intent.OriginalTxID, intent.Force, intent.AtEffectiveDate, intent.Reason, intent.IdempotencyKey)
+	case "amend":
+		return p.SubmitAmend(ctx, ledgerID, intent.OriginalTxID, intent.Metadata, intent.IdempotencyKey)
+	case "convert":
+		if intent.ConvertParams == nil {
+			return nil, fmt.Errorf("convert intent missing params")
+		}
+		return p.SubmitConvert(ctx, ledgerID, *intent.ConvertParams, intent.IdempotencyKey)
+	case "set_metadata":
+		return p.SubmitSetMetadata(ctx, ledgerID, intent.TargetType, intent.TargetID, intent.Metadata, intent.IdempotencyKey)
+	case "delete_metadata":
+		return p.SubmitDeleteMetadata(ctx, ledgerID, intent.TargetType, intent.TargetID, intent.MetadataKey, intent.IdempotencyKey)
+	default:
+		return nil, fmt.Errorf("unsupported batch intent type: %s", intent.Type)
+	}
+}
+
+// executeIntentInTx executes a single batch intent against an already-open
+// transaction. Used by ALL_OR_NOTHING mode to ensure atomicity.
+func (p *Planner) executeIntentInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	switch intent.Type {
+	case "post":
+		return p.executePostInTx(ctx, txStore, ledgerID, intent)
+	case "set_metadata":
+		return p.executeSetMetadataInTx(ctx, txStore, ledgerID, intent)
+	case "delete_metadata":
+		return p.executeDeleteMetadataInTx(ctx, txStore, ledgerID, intent)
+	case "authorize":
+		return p.executeAuthorizeInTx(ctx, txStore, ledgerID, intent)
+	case "capture":
+		return p.executeCaptureInTx(ctx, txStore, ledgerID, intent)
+	case "void":
+		return p.executeVoidInTx(ctx, txStore, ledgerID, intent)
+	case "revert":
+		return p.executeRevertInTx(ctx, txStore, ledgerID, intent)
+	case "amend":
+		return p.executeAmendInTx(ctx, txStore, ledgerID, intent)
+	case "convert":
+		return p.executeConvertInTx(ctx, txStore, ledgerID, intent)
+	default:
+		return nil, fmt.Errorf("unsupported operation type %q in batch", intent.Type)
+	}
+}
+
+func (p *Planner) executePostInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+	txID := ulid.Make().String()
+
+	ledger, err := txStore.GetLedger(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check balances.
+	type acctAsset struct{ Account, Asset string }
+	netOutputs := make(map[acctAsset]*big.Int)
+	netInputs := make(map[acctAsset]*big.Int)
+	for _, posting := range intent.Postings {
+		if posting.Amount.Sign() == 0 {
+			continue
+		}
+		srcKey := acctAsset{posting.Source, posting.Asset}
+		if netOutputs[srcKey] == nil {
+			netOutputs[srcKey] = new(big.Int)
+		}
+		netOutputs[srcKey].Add(netOutputs[srcKey], posting.Amount)
+
+		dstKey := acctAsset{posting.Destination, posting.Asset}
+		if netInputs[dstKey] == nil {
+			netInputs[dstKey] = new(big.Int)
+		}
+		netInputs[dstKey].Add(netInputs[dstKey], posting.Amount)
+	}
+
+	for key, output := range netOutputs {
+		if accounts.IsIssuer(key.Account, ledger.IssuerAccounts) {
+			continue
+		}
+		bal, err := txStore.GetBalance(ctx, ledgerID, key.Account, key.Asset, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		currentBalance := new(big.Int).Sub(bal.Input, bal.Output)
+		activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, key.Account, key.Asset)
+		if err != nil {
+			return nil, err
+		}
+		currentBalance.Sub(currentBalance, activeHolds)
+		if netIn, ok := netInputs[key]; ok {
+			currentBalance.Add(currentBalance, netIn)
+		}
+		if new(big.Int).Sub(currentBalance, output).Sign() < 0 {
+			return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, key.Account, key.Asset)
+		}
+	}
+
+	postingRecords := make([]map[string]any, len(intent.Postings))
+	for i, p := range intent.Postings {
+		postingRecords[i] = map[string]any{
+			"source": p.Source, "destination": p.Destination,
+			"amount": p.Amount.String(), "asset": p.Asset,
+		}
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"transaction_id": txID, "postings": postingRecords,
+		"metadata": intent.Metadata, "reference": intent.Reference,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: 1,
+		Payload: payload, IdempotencyKey: intent.IdempotencyKey,
+		BatchID: batchID, SchemaVersion: 1,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.InsertTransaction(ctx, storage.TransactionRecord{
+		LedgerID: ledgerID, TransactionID: txID, EventID: eventID,
+		ValidTime: now, SystemTime: now, Reference: intent.Reference,
+		Postings: postingRecords, Metadata: intent.Metadata,
+	}); err != nil {
+		return nil, err
+	}
+
+	touchedAccounts := make(map[string]bool)
+	for _, posting := range intent.Postings {
+		if posting.Amount.Sign() == 0 {
+			continue
+		}
+		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+			LedgerID: ledgerID, Account: posting.Source, Asset: posting.Asset,
+			EventID: eventID, ValidTime: now, SystemTime: now,
+			InputDelta: big.NewInt(0), OutputDelta: posting.Amount,
+		}); err != nil {
+			return nil, err
+		}
+		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+			LedgerID: ledgerID, Account: posting.Destination, Asset: posting.Asset,
+			EventID: eventID, ValidTime: now, SystemTime: now,
+			InputDelta: posting.Amount, OutputDelta: big.NewInt(0),
+		}); err != nil {
+			return nil, err
+		}
+		touchedAccounts[posting.Source] = true
+		touchedAccounts[posting.Destination] = true
+	}
+
+	for addr := range touchedAccounts {
+		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+			LedgerID: ledgerID, Address: addr, FirstUsage: now, UpdatedAt: now,
+			Metadata: map[string]any{},
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
+
+func (p *Planner) executeSetMetadataInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"target_type": intent.TargetType, "target_id": intent.TargetID, "metadata": intent.Metadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: 9,
+		Payload: payload, BatchID: batchID, SchemaVersion: 1,
+	}); err != nil {
+		return nil, err
+	}
+
+	if intent.TargetType == 0 { // ACCOUNT
+		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+			LedgerID: ledgerID, Address: intent.TargetID, FirstUsage: now, UpdatedAt: now, Metadata: intent.Metadata,
+		}); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := txStore.UpdateTransactionMetadata(ctx, ledgerID, intent.TargetID, intent.Metadata); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
+
+func (p *Planner) executeDeleteMetadataInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"target_type": intent.TargetType, "target_id": intent.TargetID, "key": intent.MetadataKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: 10,
+		Payload: payload, BatchID: batchID, SchemaVersion: 1,
+	}); err != nil {
+		return nil, err
+	}
+
+	if intent.TargetType == 1 { // TRANSACTION
+		if err := txStore.DeleteTransactionMetadataKey(ctx, ledgerID, intent.TargetID, intent.MetadataKey); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
+
+func (p *Planner) executeAuthorizeInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+	holdID := ulid.Make().String()
+
+	ledger, err := txStore.GetLedger(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	bal, err := txStore.GetBalance(ctx, ledgerID, intent.Source, intent.Asset, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	postedBalance := new(big.Int).Sub(bal.Input, bal.Output)
+
+	activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, intent.Source, intent.Asset)
+	if err != nil {
+		return nil, err
+	}
+	availableBalance := new(big.Int).Sub(postedBalance, activeHolds)
+
+	if !accounts.IsIssuer(intent.Source, ledger.IssuerAccounts) && availableBalance.Cmp(intent.Amount) < 0 {
+		return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, intent.Source, intent.Asset)
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"hold_id": holdID, "source": intent.Source, "destination_hint": intent.DestinationHint,
+		"amount": intent.Amount.String(), "asset": intent.Asset,
+		"expires_at": intent.ExpiresAt.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: 2,
+		Payload: payload, BatchID: batchID, SchemaVersion: 1,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.InsertHold(ctx, storage.HoldRecord{
+		LedgerID: ledgerID, HoldID: holdID, Source: intent.Source,
+		DestinationHint: intent.DestinationHint, Asset: intent.Asset,
+		AuthorizedAmount: intent.Amount, CapturedAmount: new(big.Int),
+		ExpiresAt: intent.ExpiresAt, AuthorizedEventID: eventID,
+		ValidTime: now, SystemTime: now,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+		LedgerID: ledgerID, Address: intent.Source, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
+	}); err != nil {
+		return nil, err
+	}
+
+	return &SubmitResult{EventID: eventID, HoldID: holdID}, nil
+}
+
+func (p *Planner) executeCaptureInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	hold, err := txStore.GetHold(ctx, ledgerID, intent.HoldID)
+	if err != nil {
+		return nil, err
+	}
+	if hold.Voided {
+		return nil, fmt.Errorf("%w: %s", storage.ErrHoldVoided, intent.HoldID)
+	}
+	if hold.Expired {
+		return nil, fmt.Errorf("%w: %s", storage.ErrHoldExpired, intent.HoldID)
+	}
+
+	remaining := new(big.Int).Sub(hold.AuthorizedAmount, hold.CapturedAmount)
+	if intent.Amount.Cmp(remaining) > 0 {
+		return nil, fmt.Errorf("%w: capture %s exceeds remaining %s on hold %s",
+			storage.ErrInsufficientFunds, intent.Amount, remaining, intent.HoldID)
+	}
+
+	dest := intent.Destination
+	if dest == "" {
+		dest = hold.DestinationHint
+	}
+	if dest == "" {
+		return nil, fmt.Errorf("destination required for capture (no destination_hint on hold)")
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"hold_id": intent.HoldID, "amount": intent.Amount.String(), "destination": dest,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: 3,
+		Payload: payload, BatchID: batchID, SchemaVersion: 1,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.UpdateHoldCaptured(ctx, ledgerID, intent.HoldID, intent.Amount); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+		LedgerID: ledgerID, Account: hold.Source, Asset: hold.Asset,
+		EventID: eventID, ValidTime: now, SystemTime: now,
+		InputDelta: big.NewInt(0), OutputDelta: intent.Amount,
+	}); err != nil {
+		return nil, err
+	}
+	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+		LedgerID: ledgerID, Account: dest, Asset: hold.Asset,
+		EventID: eventID, ValidTime: now, SystemTime: now,
+		InputDelta: intent.Amount, OutputDelta: big.NewInt(0),
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+		LedgerID: ledgerID, Address: dest, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
+	}); err != nil {
+		return nil, err
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
+
+func (p *Planner) executeVoidInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	hold, err := txStore.GetHold(ctx, ledgerID, intent.HoldID)
+	if err != nil {
+		return nil, err
+	}
+	if hold.Voided {
+		return nil, fmt.Errorf("%w: %s", storage.ErrHoldVoided, intent.HoldID)
+	}
+	if hold.Expired {
+		return nil, fmt.Errorf("%w: %s", storage.ErrHoldExpired, intent.HoldID)
+	}
+
+	payload, err := json.Marshal(map[string]string{"hold_id": intent.HoldID})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: 4,
+		Payload: payload, BatchID: batchID, SchemaVersion: 1,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.VoidHold(ctx, ledgerID, intent.HoldID); err != nil {
+		return nil, err
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
+
+func (p *Planner) executeRevertInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+	txID := ulid.Make().String()
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+
+	origTx, err := txStore.GetTransaction(ctx, ledgerID, intent.OriginalTxID)
+	if err != nil {
+		return nil, err
+	}
+
+	rels, err := txStore.GetRelationships(ctx, ledgerID, intent.OriginalTxID, 1)
+	if err != nil {
+		return nil, err
+	}
+	for _, rel := range rels {
+		if rel.RelationshipType == 0 && rel.ParentTxID == intent.OriginalTxID {
+			return nil, storage.ErrAlreadyReverted
+		}
+	}
+
+	data, err := json.Marshal(origTx.Postings)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling original postings: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var origPostings []map[string]any
+	if err := dec.Decode(&origPostings); err != nil {
+		return nil, fmt.Errorf("parsing original postings: %w", err)
+	}
+	if len(origPostings) == 0 {
+		return nil, fmt.Errorf("original transaction %s has no postings", intent.OriginalTxID)
+	}
+
+	var reversedPostings []PostingInput
+	for i, posting := range origPostings {
+		var amtStr string
+		switch v := posting["amount"].(type) {
+		case string:
+			amtStr = v
+		case json.Number:
+			amtStr = v.String()
+		default:
+			amtStr = fmt.Sprint(posting["amount"])
+		}
+		amt, ok := new(big.Int).SetString(amtStr, 10)
+		if !ok {
+			return nil, fmt.Errorf("posting %d: invalid amount %q", i, amtStr)
+		}
+		reversedPostings = append(reversedPostings, PostingInput{
+			Source:      fmt.Sprint(posting["destination"]),
+			Destination: fmt.Sprint(posting["source"]),
+			Amount:      amt,
+			Asset:       fmt.Sprint(posting["asset"]),
+		})
+	}
+
+	ledger, err := txStore.GetLedger(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	vt := now
+	if intent.AtEffectiveDate {
+		vt = origTx.ValidTime
+	}
+
+	if !intent.Force {
+		for _, posting := range reversedPostings {
+			if accounts.IsIssuer(posting.Source, ledger.IssuerAccounts) {
+				continue
+			}
+			bal, err := txStore.GetBalance(ctx, ledgerID, posting.Source, posting.Asset, nil, nil)
+			if err != nil {
+				return nil, err
+			}
+			current := new(big.Int).Sub(bal.Input, bal.Output)
+			activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, posting.Source, posting.Asset)
+			if err != nil {
+				return nil, err
+			}
+			current.Sub(current, activeHolds)
+			if new(big.Int).Sub(current, posting.Amount).Sign() < 0 {
+				return nil, fmt.Errorf("%w: reverting would leave %s negative in %s",
+					storage.ErrInsufficientFunds, posting.Source, posting.Asset)
+			}
+		}
+	}
+
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	postingRecords := make([]map[string]any, len(reversedPostings))
+	for i, rp := range reversedPostings {
+		postingRecords[i] = map[string]any{
+			"source": rp.Source, "destination": rp.Destination,
+			"amount": rp.Amount.String(), "asset": rp.Asset,
+		}
+	}
+
+	metadata := map[string]any{"reverts": intent.OriginalTxID, "revert_reason": intent.Reason}
+	payload, err := json.Marshal(map[string]any{
+		"transaction_id": txID, "postings": postingRecords, "metadata": metadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: vt, Type: 7,
+		Payload: payload, BatchID: batchID, SchemaVersion: 1,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.InsertTransaction(ctx, storage.TransactionRecord{
+		LedgerID: ledgerID, TransactionID: txID, EventID: eventID,
+		ValidTime: vt, SystemTime: now, Postings: postingRecords, Metadata: metadata,
+	}); err != nil {
+		return nil, err
+	}
+
+	touchedAccounts := make(map[string]bool)
+	for _, posting := range reversedPostings {
+		if posting.Amount.Sign() == 0 {
+			continue
+		}
+		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+			LedgerID: ledgerID, Account: posting.Source, Asset: posting.Asset,
+			EventID: eventID, ValidTime: vt, SystemTime: now,
+			InputDelta: big.NewInt(0), OutputDelta: posting.Amount,
+		}); err != nil {
+			return nil, err
+		}
+		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+			LedgerID: ledgerID, Account: posting.Destination, Asset: posting.Asset,
+			EventID: eventID, ValidTime: vt, SystemTime: now,
+			InputDelta: posting.Amount, OutputDelta: big.NewInt(0),
+		}); err != nil {
+			return nil, err
+		}
+		touchedAccounts[posting.Source] = true
+		touchedAccounts[posting.Destination] = true
+	}
+
+	for addr := range touchedAccounts {
+		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+			LedgerID: ledgerID, Address: addr, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := txStore.InsertRelationship(ctx, storage.RelationshipRecord{
+		LedgerID: ledgerID, ParentTxID: intent.OriginalTxID, ChildTxID: txID,
+		RelationshipType: 0, EventID: eventID, SystemTime: now,
+	}); err != nil {
+		return nil, err
+	}
+
+	return &SubmitResult{EventID: eventID, Transaction: &storage.TransactionRecord{
+		LedgerID: ledgerID, TransactionID: txID, EventID: eventID,
+		ValidTime: vt, SystemTime: now, Postings: postingRecords, Metadata: metadata,
+	}}, nil
+}
+
+func (p *Planner) executeAmendInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := txStore.GetTransaction(ctx, ledgerID, intent.OriginalTxID); err != nil {
+		return nil, err
+	}
+
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"original_transaction_id": intent.OriginalTxID,
+		"metadata_changes":        intent.Metadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: 8,
+		Payload: payload, BatchID: batchID, SchemaVersion: 1,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.UpdateTransactionMetadata(ctx, ledgerID, intent.OriginalTxID, intent.Metadata); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.InsertMetadataHistory(ctx, storage.MetadataHistoryRecord{
+		LedgerID: ledgerID, TargetType: 1,
+		TargetID: intent.OriginalTxID, Revision: seq,
+		Metadata: intent.Metadata, EventID: eventID, SystemTime: now,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.InsertRelationship(ctx, storage.RelationshipRecord{
+		LedgerID: ledgerID, ParentTxID: intent.OriginalTxID,
+		ChildTxID: eventID, RelationshipType: 1,
+		EventID: eventID, SystemTime: now,
+	}); err != nil {
+		return nil, err
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
+
+func (p *Planner) executeConvertInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
+	if intent.ConvertParams == nil {
+		return nil, fmt.Errorf("convert intent missing params")
+	}
+	params := *intent.ConvertParams
+
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+	conversionID := ulid.Make().String()
+	txID := ulid.Make().String()
+
+	ledger, err := txStore.GetLedger(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	vt := now
+	if params.ValidTime != nil {
+		vt = *params.ValidTime
+	}
+
+	// Balance check with slippage.
+	if !accounts.IsIssuer(params.Source, ledger.IssuerAccounts) {
+		bal, err := txStore.GetBalance(ctx, ledgerID, params.Source, params.SourceAsset, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		current := new(big.Int).Sub(bal.Input, bal.Output)
+		activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, params.Source, params.SourceAsset)
+		if err != nil {
+			return nil, err
+		}
+		current.Sub(current, activeHolds)
+
+		totalSourceOutput := new(big.Int).Set(params.SourceAmount)
+		if params.SlippageAmount != nil && params.SlippageAmount.Sign() > 0 {
+			totalSourceOutput.Add(totalSourceOutput, params.SlippageAmount)
+		}
+		if current.Cmp(totalSourceOutput) < 0 {
+			return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, params.Source, params.SourceAsset)
+		}
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"conversion_id": conversionID, "source": params.Source, "destination": params.Destination,
+		"source_amount": params.SourceAmount.String(), "source_asset": params.SourceAsset,
+		"destination_amount": params.DestAmount.String(), "destination_asset": params.DestAsset,
+		"rate": params.Rate, "rate_source": params.RateSource,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: vt, Type: 6,
+		Payload: payload, BatchID: batchID, SchemaVersion: 1,
+	}); err != nil {
+		return nil, err
+	}
+
+	// Leg 1: source sends source_asset to destination.
+	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+		LedgerID: ledgerID, Account: params.Source, Asset: params.SourceAsset,
+		EventID: eventID, ValidTime: vt, SystemTime: now,
+		InputDelta: big.NewInt(0), OutputDelta: params.SourceAmount,
+	}); err != nil {
+		return nil, err
+	}
+	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+		LedgerID: ledgerID, Account: params.Destination, Asset: params.SourceAsset,
+		EventID: eventID, ValidTime: vt, SystemTime: now,
+		InputDelta: params.SourceAmount, OutputDelta: big.NewInt(0),
+	}); err != nil {
+		return nil, err
+	}
+
+	// Leg 2: destination sends dest_asset to source.
+	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+		LedgerID: ledgerID, Account: params.Destination, Asset: params.DestAsset,
+		EventID: eventID, ValidTime: vt, SystemTime: now,
+		InputDelta: big.NewInt(0), OutputDelta: params.DestAmount,
+	}); err != nil {
+		return nil, err
+	}
+	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+		LedgerID: ledgerID, Account: params.Source, Asset: params.DestAsset,
+		EventID: eventID, ValidTime: vt, SystemTime: now,
+		InputDelta: params.DestAmount, OutputDelta: big.NewInt(0),
+	}); err != nil {
+		return nil, err
+	}
+
+	// Optional slippage.
+	if params.SlippageAmount != nil && params.SlippageAmount.Sign() > 0 && params.SlippageAccount != "" {
+		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+			LedgerID: ledgerID, Account: params.Source, Asset: params.SourceAsset,
+			EventID: eventID, ValidTime: vt, SystemTime: now,
+			InputDelta: big.NewInt(0), OutputDelta: params.SlippageAmount,
+		}); err != nil {
+			return nil, err
+		}
+		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+			LedgerID: ledgerID, Account: params.SlippageAccount, Asset: params.SourceAsset,
+			EventID: eventID, ValidTime: vt, SystemTime: now,
+			InputDelta: params.SlippageAmount, OutputDelta: big.NewInt(0),
+		}); err != nil {
+			return nil, err
+		}
+		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+			LedgerID: ledgerID, Address: params.SlippageAccount, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+		LedgerID: ledgerID, Address: params.Source, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
+	}); err != nil {
+		return nil, err
+	}
+	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+		LedgerID: ledgerID, Address: params.Destination, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
+	}); err != nil {
+		return nil, err
+	}
+
+	postingRecords := []map[string]any{
+		{"source": params.Source, "destination": params.Destination, "amount": params.SourceAmount.String(), "asset": params.SourceAsset},
+		{"source": params.Destination, "destination": params.Source, "amount": params.DestAmount.String(), "asset": params.DestAsset},
+	}
+	if params.SlippageAmount != nil && params.SlippageAmount.Sign() > 0 && params.SlippageAccount != "" {
+		postingRecords = append(postingRecords, map[string]any{
+			"source": params.Source, "destination": params.SlippageAccount,
+			"amount": params.SlippageAmount.String(), "asset": params.SourceAsset,
+		})
+	}
+	if err := txStore.InsertTransaction(ctx, storage.TransactionRecord{
+		LedgerID: ledgerID, TransactionID: txID, EventID: eventID,
+		ValidTime: vt, SystemTime: now, Postings: postingRecords,
+		Metadata: map[string]any{"type": "conversion", "rate": params.Rate, "rate_source": params.RateSource},
+	}); err != nil {
+		return nil, err
+	}
+
+	return &SubmitResult{EventID: eventID, ConversionID: conversionID}, nil
+}
