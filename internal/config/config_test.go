@@ -3,11 +3,42 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/spf13/pflag"
 )
+
+func TestSplitCSV(t *testing.T) {
+	tests := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"a", []string{"a"}},
+		{" ops-admin , , billing ", []string{"ops-admin", "billing"}},
+		{"x,y,z", []string{"x", "y", "z"}},
+		{"  ,  ", nil},
+	}
+	for _, tt := range tests {
+		if got := splitCSV(tt.in); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("splitCSV(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestNew_AdminPrincipalsParsed(t *testing.T) {
+	t.Setenv("LEDGER_AUTH_ADMIN_PRINCIPALS", "ops-admin, billing ")
+	cfg, err := New(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"ops-admin", "billing"}
+	if !reflect.DeepEqual(cfg.Auth.AdminPrincipals, want) {
+		t.Errorf("admin principals = %v, want %v (exact match against JWT subject)", cfg.Auth.AdminPrincipals, want)
+	}
+}
 
 func TestNew_Defaults(t *testing.T) {
 	// Clear any env vars that might interfere.
@@ -171,6 +202,11 @@ func TestNew_ValidationErrors(t *testing.T) {
 			name:    "stuck approval threshold must be positive",
 			envVars: map[string]string{"LEDGER_WORKER_STUCK_APPROVAL_THRESHOLD": "0s"},
 			wantErr: "stuck_approval_threshold must be positive",
+		},
+		{
+			name:    "rate limit enabled requires positive rps",
+			envVars: map[string]string{"LEDGER_RATE_LIMIT_ENABLED": "true"},
+			wantErr: "rate_limit.read_rps and rate_limit.write_rps must be positive",
 		},
 	}
 

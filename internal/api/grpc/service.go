@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/remade/ledger/internal/api/grpc/auth"
+	"github.com/remade/ledger/internal/config"
 	"github.com/remade/ledger/internal/log/batch"
 	"github.com/remade/ledger/internal/planner"
 	"github.com/remade/ledger/internal/storage"
@@ -31,17 +32,40 @@ type LedgerService struct {
 	batch   *batch.Manager
 	subs    *subscriptions.Manager
 	logger  *zap.Logger
+
+	// authEnabled and adminPrincipals gate the privileged Import/Export RPCs.
+	authEnabled     bool
+	adminPrincipals map[string]bool
 }
 
 // NewLedgerService creates a new LedgerService.
-func NewLedgerService(store storage.Store, p *planner.Planner, bm *batch.Manager, sm *subscriptions.Manager, logger *zap.Logger) *LedgerService {
-	return &LedgerService{
-		store:   store,
-		planner: p,
-		batch:   bm,
-		subs:    sm,
-		logger:  logger.Named("api"),
+func NewLedgerService(store storage.Store, p *planner.Planner, bm *batch.Manager, sm *subscriptions.Manager, authCfg config.AuthConfig, logger *zap.Logger) *LedgerService {
+	admins := make(map[string]bool, len(authCfg.AdminPrincipals))
+	for _, a := range authCfg.AdminPrincipals {
+		admins[a] = true
 	}
+	return &LedgerService{
+		store:           store,
+		planner:         p,
+		batch:           bm,
+		subs:            sm,
+		logger:          logger.Named("api"),
+		authEnabled:     authCfg.Enabled,
+		adminPrincipals: admins,
+	}
+}
+
+// requireImportExportAuthz gates the privileged Import/Export RPCs. When auth is
+// enabled, only configured admin principals are permitted (default-deny). When
+// auth is disabled (development), the operations are open for convenience.
+func (s *LedgerService) requireImportExportAuthz(principal string) error {
+	if !s.authEnabled {
+		return nil
+	}
+	if s.adminPrincipals[principal] {
+		return nil
+	}
+	return status.Errorf(codes.PermissionDenied, "principal %q is not authorized for import/export", principal)
 }
 
 func (s *LedgerService) CreateLedger(ctx context.Context, req *pb.CreateLedgerRequest) (*pb.Ledger, error) {
@@ -438,9 +462,20 @@ func (s *LedgerService) VerifyBatch(ctx context.Context, req *pb.VerifyBatchRequ
 }
 
 func (s *LedgerService) Export(req *pb.ExportRequest, stream pb.LedgerService_ExportServer) error {
+	ctx := stream.Context()
+	// Export streams the full event log; require admin authorization (default-deny
+	// under auth) before any data leaves the server, then apply any policy rules.
+	principal := extractPrincipal(ctx)
+	if err := s.requireImportExportAuthz(principal); err != nil {
+		return err
+	}
+	if err := s.planner.EvaluatePolicy(ctx, req.LedgerId, principal, "export", nil); err != nil {
+		return mapPlannerError(err)
+	}
+
 	pageToken := ""
 	for {
-		events, nextToken, err := s.store.ListLogEvents(stream.Context(), req.LedgerId,
+		events, nextToken, err := s.store.ListLogEvents(ctx, req.LedgerId,
 			storage.ListParams{PageSize: 1000, PageToken: pageToken})
 		if err != nil {
 			return status.Errorf(codes.Internal, "listing events for export: %v", err)
@@ -458,8 +493,43 @@ func (s *LedgerService) Export(req *pb.ExportRequest, stream pb.LedgerService_Ex
 	return nil
 }
 
+// validateImportEvent checks the structural validity of an event before it is
+// written directly to the log via Import.
+func validateImportEvent(event *pb.LogEvent) error {
+	if event.LedgerId == "" {
+		return status.Error(codes.InvalidArgument, "event ledger_id is required")
+	}
+	if event.EventId == "" {
+		return status.Error(codes.InvalidArgument, "event event_id is required")
+	}
+	if event.Type <= 0 {
+		return status.Errorf(codes.InvalidArgument, "event %q has invalid type %d", event.EventId, event.Type)
+	}
+	if _, ok := pb.EventType_name[int32(event.Type)]; !ok {
+		return status.Errorf(codes.InvalidArgument, "event %q has unknown event type %d", event.EventId, event.Type)
+	}
+	if len(event.Payload) == 0 {
+		return status.Errorf(codes.InvalidArgument, "event %q has an empty payload", event.EventId)
+	}
+	if event.SystemTime == nil || event.ValidTime == nil {
+		return status.Errorf(codes.InvalidArgument, "event %q is missing system_time or valid_time", event.EventId)
+	}
+	return nil
+}
+
 func (s *LedgerService) Import(stream pb.LedgerService_ImportServer) error {
+	ctx := stream.Context()
+	principal := extractPrincipal(ctx)
+	// Import writes raw events directly to the source-of-truth log; gate it behind
+	// admin authorization (default-deny under auth) before accepting any data.
+	if err := s.requireImportExportAuthz(principal); err != nil {
+		return err
+	}
 	var count int64
+	// authorized caches the per-ledger policy + sealed check so it runs once per
+	// distinct target ledger rather than per event.
+	authorized := make(map[string]bool)
+
 	for {
 		event, err := stream.Recv()
 		if err != nil {
@@ -468,7 +538,31 @@ func (s *LedgerService) Import(stream pb.LedgerService_ImportServer) error {
 			}
 			return status.Errorf(codes.Internal, "receiving event: %v", err)
 		}
-		if err := s.store.AppendLogEvent(stream.Context(), storage.LogEventRecord{
+
+		// Validate event structure before it touches the log.
+		if err := validateImportEvent(event); err != nil {
+			return err
+		}
+
+		// Authorize and verify the ledger is not sealed before writing.
+		if !authorized[event.LedgerId] {
+			if err := s.planner.EvaluatePolicy(ctx, event.LedgerId, principal, "import", nil); err != nil {
+				return mapPlannerError(err)
+			}
+			ledger, err := s.store.GetLedger(ctx, event.LedgerId)
+			if err != nil {
+				if isNotFound(err) {
+					return status.Errorf(codes.NotFound, "ledger %q not found", event.LedgerId)
+				}
+				return status.Errorf(codes.Internal, "checking ledger: %v", err)
+			}
+			if ledger.State == "sealed" {
+				return status.Errorf(codes.FailedPrecondition, "ledger %q is sealed; import rejected", event.LedgerId)
+			}
+			authorized[event.LedgerId] = true
+		}
+
+		if err := s.store.AppendLogEvent(ctx, storage.LogEventRecord{
 			EventID:        event.EventId,
 			LedgerID:       event.LedgerId,
 			LedgerSeq:      int64(event.LedgerSeq),
@@ -480,6 +574,9 @@ func (s *LedgerService) Import(stream pb.LedgerService_ImportServer) error {
 			BatchID:        event.BatchId,
 			SchemaVersion:  int64(event.SchemaVersion),
 		}); err != nil {
+			if errors.Is(err, storage.ErrIdempotencyKeyConflict) {
+				return status.Errorf(codes.AlreadyExists, "event %q already exists (idempotency conflict)", event.EventId)
+			}
 			return status.Errorf(codes.Internal, "importing event: %v", err)
 		}
 		count++

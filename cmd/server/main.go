@@ -21,6 +21,7 @@ import (
 
 	grpcapi "github.com/remade/ledger/internal/api/grpc"
 	"github.com/remade/ledger/internal/api/grpc/auth"
+	"github.com/remade/ledger/internal/api/grpc/ratelimit"
 	"github.com/remade/ledger/internal/config"
 	"github.com/remade/ledger/internal/observability"
 	"github.com/remade/ledger/internal/planner"
@@ -46,6 +47,7 @@ func main() {
 		planner.Module,
 		grpcapi.Module,
 		fx.Provide(newAuthenticator),
+		fx.Provide(newRateLimiter),
 		fx.Provide(newGRPCServer),
 		fx.Provide(newHTTPServer),
 		fx.Invoke(registerLedgerService),
@@ -79,14 +81,31 @@ func newAuthenticator(lc fx.Lifecycle, cfg *config.Config, logger *zap.Logger) (
 	return authn, nil
 }
 
-func newGRPCServer(cfg *config.Config, authn auth.Authenticator, logger *zap.Logger) *grpc.Server {
-	unary := make([]grpc.UnaryServerInterceptor, 0, 2)
-	stream := make([]grpc.StreamServerInterceptor, 0, 2)
+// newRateLimiter builds the per-principal rate limiter, or nil when disabled
+// (in which case no rate-limit interceptor is wired). It is Redis-backed so
+// limits are shared across server instances.
+func newRateLimiter(cfg config.RateLimitConfig, rc *redis.Client, logger *zap.Logger) *ratelimit.Limiter {
+	if !cfg.Enabled {
+		return nil
+	}
+	logger.Info("rate limiting enabled",
+		zap.Int("read_rps", cfg.ReadRPS), zap.Int("write_rps", cfg.WriteRPS))
+	return ratelimit.New(ratelimit.RedisCounter(rc.Underlying()), cfg.ReadRPS, cfg.WriteRPS, logger)
+}
+
+func newGRPCServer(cfg *config.Config, authn auth.Authenticator, rl *ratelimit.Limiter, logger *zap.Logger) *grpc.Server {
+	unary := make([]grpc.UnaryServerInterceptor, 0, 3)
+	stream := make([]grpc.StreamServerInterceptor, 0, 3)
 	if cfg.Auth.Enabled {
 		// Authentication runs first so the principal is established before any
 		// downstream interceptor or handler observes the request.
 		unary = append(unary, auth.NewUnaryServerInterceptor(authn, logger))
 		stream = append(stream, auth.NewStreamServerInterceptor(authn, logger))
+	}
+	if rl != nil {
+		// Rate limiting runs after auth so quotas are keyed on the real principal.
+		unary = append(unary, rl.UnaryServerInterceptor())
+		stream = append(stream, rl.StreamServerInterceptor())
 	}
 	unary = append(unary, loggingUnaryInterceptor(logger))
 	stream = append(stream, loggingStreamInterceptor(logger))

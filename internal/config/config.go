@@ -21,6 +21,7 @@ type Config struct {
 	OTel        OTelConfig
 	Worker      WorkerConfig
 	Auth        AuthConfig
+	RateLimit   RateLimitConfig
 	Environment string
 	LogLevel    string
 }
@@ -65,6 +66,17 @@ type AuthConfig struct {
 	JWKSURL  string
 	Audience string
 	Issuer   string
+	// AdminPrincipals may use the Import/Export RPCs. When auth is enabled these
+	// are the ONLY principals allowed those operations (empty => none).
+	AdminPrincipals []string
+}
+
+// RateLimitConfig configures per-principal request rate limiting. A non-positive
+// RPS means unlimited for that class.
+type RateLimitConfig struct {
+	Enabled  bool
+	ReadRPS  int
+	WriteRPS int
 }
 
 // RegisterFlags binds CLI flags to viper keys. Call this before New().
@@ -88,6 +100,10 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("auth-jwks-url", "", "JWKS URL used to verify JWT signatures")
 	fs.String("auth-audience", "", "Expected JWT audience (aud) claim; empty disables the check")
 	fs.String("auth-issuer", "", "Expected JWT issuer (iss) claim; empty disables the check")
+	fs.String("auth-admin-principals", "", "Comma-separated principals allowed to use Import/Export")
+	fs.Bool("rate-limit-enabled", false, "Enable per-principal request rate limiting")
+	fs.Int("rate-limit-read-rps", 0, "Max read requests/sec per principal (0 = unlimited)")
+	fs.Int("rate-limit-write-rps", 0, "Max write requests/sec per principal (0 = unlimited)")
 	fs.String("env-file", ".env", "Path to .env file (set to empty to disable)")
 }
 
@@ -118,6 +134,10 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 	v.SetDefault("auth.jwks_url", "")
 	v.SetDefault("auth.audience", "")
 	v.SetDefault("auth.issuer", "")
+	v.SetDefault("auth.admin_principals", "")
+	v.SetDefault("rate_limit.enabled", false)
+	v.SetDefault("rate_limit.read_rps", 0)
+	v.SetDefault("rate_limit.write_rps", 0)
 
 	// --- Environment variables ---
 	v.SetEnvPrefix("LEDGER")
@@ -159,6 +179,10 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 		bindFlag(v, fs, "auth-jwks-url", "auth.jwks_url")
 		bindFlag(v, fs, "auth-audience", "auth.audience")
 		bindFlag(v, fs, "auth-issuer", "auth.issuer")
+		bindFlag(v, fs, "auth-admin-principals", "auth.admin_principals")
+		bindFlag(v, fs, "rate-limit-enabled", "rate_limit.enabled")
+		bindFlag(v, fs, "rate-limit-read-rps", "rate_limit.read_rps")
+		bindFlag(v, fs, "rate-limit-write-rps", "rate_limit.write_rps")
 	}
 
 	// --- Build config struct ---
@@ -187,11 +211,17 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 			StuckApprovalThreshold: v.GetDuration("worker.stuck_approval_threshold"),
 		},
 		Auth: AuthConfig{
-			Enabled:  v.GetBool("auth.enabled"),
-			Method:   v.GetString("auth.method"),
-			JWKSURL:  v.GetString("auth.jwks_url"),
-			Audience: v.GetString("auth.audience"),
-			Issuer:   v.GetString("auth.issuer"),
+			Enabled:         v.GetBool("auth.enabled"),
+			Method:          v.GetString("auth.method"),
+			JWKSURL:         v.GetString("auth.jwks_url"),
+			Audience:        v.GetString("auth.audience"),
+			Issuer:          v.GetString("auth.issuer"),
+			AdminPrincipals: splitCSV(v.GetString("auth.admin_principals")),
+		},
+		RateLimit: RateLimitConfig{
+			Enabled:  v.GetBool("rate_limit.enabled"),
+			ReadRPS:  v.GetInt("rate_limit.read_rps"),
+			WriteRPS: v.GetInt("rate_limit.write_rps"),
 		},
 		Environment: v.GetString("environment"),
 		LogLevel:    v.GetString("log_level"),
@@ -257,6 +287,11 @@ func (c *Config) validate() error {
 	if c.Environment == "production" && !c.Auth.Enabled {
 		return fmt.Errorf("config: auth.enabled must be true in the production environment")
 	}
+	if c.RateLimit.Enabled {
+		if c.RateLimit.ReadRPS <= 0 || c.RateLimit.WriteRPS <= 0 {
+			return fmt.Errorf("config: rate_limit.read_rps and rate_limit.write_rps must be positive when rate_limit.enabled is true")
+		}
+	}
 	return nil
 }
 
@@ -298,6 +333,21 @@ func loadDotEnv(path string) error {
 	return scanner.Err()
 }
 
+// splitCSV parses a comma-separated list, trimming whitespace and dropping
+// empty entries. Returns nil for an empty input.
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // bindFlag binds a pflag to a viper key only if the flag was explicitly set.
 func bindFlag(v *viper.Viper, fs *pflag.FlagSet, flagName, viperKey string) {
 	if f := fs.Lookup(flagName); f != nil && f.Changed {
@@ -319,5 +369,6 @@ var Module = fx.Module("config",
 		func(c *Config) OTelConfig { return c.OTel },
 		func(c *Config) WorkerConfig { return c.Worker },
 		func(c *Config) AuthConfig { return c.Auth },
+		func(c *Config) RateLimitConfig { return c.RateLimit },
 	),
 )
