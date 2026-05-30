@@ -52,6 +52,9 @@ func TestNew_EnvVarsOverrideDefaults(t *testing.T) {
 	t.Setenv("LEDGER_GRPC_PORT", "9999")
 	t.Setenv("LEDGER_LOG_LEVEL", "debug")
 	t.Setenv("LEDGER_ENVIRONMENT", "production")
+	// Production requires authentication to be configured.
+	t.Setenv("LEDGER_AUTH_ENABLED", "true")
+	t.Setenv("LEDGER_AUTH_JWKS_URL", "https://issuer.example.com/.well-known/jwks.json")
 
 	cfg, err := New(nil)
 	if err != nil {
@@ -145,6 +148,21 @@ func TestNew_ValidationErrors(t *testing.T) {
 			name:    "invalid log level",
 			envVars: map[string]string{"LEDGER_LOG_LEVEL": "verbose"},
 			wantErr: "log_level must be one of",
+		},
+		{
+			name:    "production requires auth enabled",
+			envVars: map[string]string{"LEDGER_ENVIRONMENT": "production"},
+			wantErr: "auth.enabled must be true",
+		},
+		{
+			name:    "auth enabled requires jwks url",
+			envVars: map[string]string{"LEDGER_AUTH_ENABLED": "true"},
+			wantErr: "auth.jwks_url is required",
+		},
+		{
+			name:    "auth method must be jwt",
+			envVars: map[string]string{"LEDGER_AUTH_ENABLED": "true", "LEDGER_AUTH_METHOD": "mtls", "LEDGER_AUTH_JWKS_URL": "https://x/jwks"},
+			wantErr: `auth.method must be "jwt"`,
 		},
 	}
 

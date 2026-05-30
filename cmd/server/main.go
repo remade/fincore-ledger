@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	grpcapi "github.com/remade/ledger/internal/api/grpc"
+	"github.com/remade/ledger/internal/api/grpc/auth"
 	"github.com/remade/ledger/internal/config"
 	"github.com/remade/ledger/internal/observability"
 	"github.com/remade/ledger/internal/planner"
@@ -44,6 +45,7 @@ func main() {
 		redis.Module,
 		planner.Module,
 		grpcapi.Module,
+		fx.Provide(newAuthenticator),
 		fx.Provide(newGRPCServer),
 		fx.Provide(newHTTPServer),
 		fx.Invoke(registerLedgerService),
@@ -52,19 +54,55 @@ func main() {
 	).Run()
 }
 
-func newGRPCServer(logger *zap.Logger) *grpc.Server {
+// newAuthenticator builds the request authenticator. When authentication is
+// disabled (a development-only configuration), it returns a nil Authenticator
+// and no auth interceptor is wired. The JWKS refresh goroutine is bound to a
+// context cancelled on shutdown.
+func newAuthenticator(lc fx.Lifecycle, cfg *config.Config, logger *zap.Logger) (auth.Authenticator, error) {
+	if !cfg.Auth.Enabled {
+		logger.Warn("authentication is disabled; all requests run as the anonymous principal")
+		return nil, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	authn, err := auth.NewJWTAuthenticator(ctx, cfg.Auth.JWKSURL, cfg.Auth.Audience, cfg.Auth.Issuer)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("initializing authenticator: %w", err)
+	}
+	lc.Append(fx.Hook{
+		OnStop: func(context.Context) error {
+			cancel()
+			return nil
+		},
+	})
+	logger.Info("JWT authentication enabled", zap.String("jwks_url", cfg.Auth.JWKSURL))
+	return authn, nil
+}
+
+func newGRPCServer(cfg *config.Config, authn auth.Authenticator, logger *zap.Logger) *grpc.Server {
+	unary := make([]grpc.UnaryServerInterceptor, 0, 2)
+	stream := make([]grpc.StreamServerInterceptor, 0, 2)
+	if cfg.Auth.Enabled {
+		// Authentication runs first so the principal is established before any
+		// downstream interceptor or handler observes the request.
+		unary = append(unary, auth.NewUnaryServerInterceptor(authn, logger))
+		stream = append(stream, auth.NewStreamServerInterceptor(authn, logger))
+	}
+	unary = append(unary, loggingUnaryInterceptor(logger))
+	stream = append(stream, loggingStreamInterceptor(logger))
+
 	srv := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(
-			loggingUnaryInterceptor(logger),
-		),
-		grpc.ChainStreamInterceptor(
-			loggingStreamInterceptor(logger),
-		),
+		grpc.ChainUnaryInterceptor(unary...),
+		grpc.ChainStreamInterceptor(stream...),
 	)
 	healthServer := health.NewServer()
 	healthpb.RegisterHealthServer(srv, healthServer)
 	healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-	reflection.Register(srv)
+	// Reflection exposes the full service schema and method list; restrict it to
+	// the development environment.
+	if cfg.Environment == "development" {
+		reflection.Register(srv)
+	}
 	return srv
 }
 
@@ -119,6 +157,9 @@ func startGRPC(lc fx.Lifecycle, srv *grpc.Server, cfg config.GRPCConfig, logger 
 
 func newHTTPServer(cfg config.HTTPConfig, grpcCfg config.GRPCConfig, db *postgres.DB, rc *redis.Client, logger *zap.Logger) (*http.Server, error) {
 	// Create the grpc-gateway mux that proxies REST requests to the gRPC server.
+	// grpc-gateway forwards the REST Authorization header to gRPC as the bare
+	// "authorization" metadata key, which the auth interceptor reads — so the
+	// bearer token is validated end-to-end without a custom header matcher.
 	gwMux := runtime.NewServeMux()
 	grpcEndpoint := fmt.Sprintf("127.0.0.1:%d", grpcCfg.Port)
 	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}

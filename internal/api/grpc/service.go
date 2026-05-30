@@ -12,10 +12,10 @@ import (
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/remade/ledger/internal/api/grpc/auth"
 	"github.com/remade/ledger/internal/log/batch"
 	"github.com/remade/ledger/internal/planner"
 	"github.com/remade/ledger/internal/storage"
@@ -532,7 +532,7 @@ func (s *LedgerService) handleAuthorize(ctx context.Context, intent *pb.Intent, 
 			Hold: &pb.Hold{
 				HoldId:           result.HoldID,
 				Source:           op.Source,
-				DestinationHint: op.DestinationHint,
+				DestinationHint:  op.DestinationHint,
 				Asset:            op.Asset,
 				AuthorizedAmount: op.Amount,
 				CapturedAmount:   "0",
@@ -799,19 +799,18 @@ func (s *LedgerService) handleConvert(ctx context.Context, intent *pb.Intent, op
 		Output: &pb.SubmitResponse_Conversion{
 			Conversion: &pb.Conversion{
 				ConversionId:      result.ConversionID,
-				Source:             op.Source,
-				Destination:        op.Destination,
-				SourceAmount:       op.SourceAmount,
-				SourceAsset:        op.SourceAsset,
-				DestinationAmount:  op.DestinationAmount,
-				DestinationAsset:   op.DestinationAsset,
-				Rate:               op.Rate,
-				RateSource:         op.RateSource,
+				Source:            op.Source,
+				Destination:       op.Destination,
+				SourceAmount:      op.SourceAmount,
+				SourceAsset:       op.SourceAsset,
+				DestinationAmount: op.DestinationAmount,
+				DestinationAsset:  op.DestinationAsset,
+				Rate:              op.Rate,
+				RateSource:        op.RateSource,
 			},
 		},
 	}, nil
 }
-
 
 func (s *LedgerService) SubmitForApproval(ctx context.Context, req *pb.SubmitForApprovalRequest) (*pb.SubmitForApprovalResponse, error) {
 	if req.LedgerId == "" {
@@ -958,7 +957,7 @@ func holdRecordToProto(rec *storage.HoldRecord) *pb.Hold {
 		LedgerId:         rec.LedgerID,
 		HoldId:           rec.HoldID,
 		Source:           rec.Source,
-		DestinationHint: rec.DestinationHint,
+		DestinationHint:  rec.DestinationHint,
 		Asset:            rec.Asset,
 		AuthorizedAmount: rec.AuthorizedAmount.String(),
 		CapturedAmount:   rec.CapturedAmount.String(),
@@ -969,16 +968,17 @@ func holdRecordToProto(rec *storage.HoldRecord) *pb.Hold {
 		SystemTime:       timestamppb.New(rec.SystemTime),
 	}
 }
-// extractPrincipal reads the principal identity from gRPC metadata.
-// Returns "anonymous" if no principal is found (auth not yet configured).
+
+// extractPrincipal returns the authenticated principal placed in the context by
+// the auth interceptor. The identity is derived from a validated credential —
+// never from a client-supplied header. When authentication is disabled (a
+// development-only configuration), no principal is present and the anonymous
+// principal is returned.
 func extractPrincipal(ctx context.Context) string {
-	md, ok := metadata.FromIncomingContext(ctx)
-	if ok {
-		if vals := md.Get("x-principal"); len(vals) > 0 {
-			return vals[0]
-		}
+	if principal, ok := auth.PrincipalFromContext(ctx); ok {
+		return principal
 	}
-	return "anonymous"
+	return auth.AnonymousPrincipal
 }
 
 // classifyIntent returns the operation type name and list of accounts touched by the intent.
@@ -1032,4 +1032,3 @@ var Module = fx.Module("api",
 		subscriptions.NewManager,
 	),
 )
-

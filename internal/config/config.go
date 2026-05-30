@@ -20,6 +20,7 @@ type Config struct {
 	HTTP        HTTPConfig
 	OTel        OTelConfig
 	Worker      WorkerConfig
+	Auth        AuthConfig
 	Environment string
 	LogLevel    string
 }
@@ -46,10 +47,21 @@ type OTelConfig struct {
 }
 
 type WorkerConfig struct {
-	BatchCloseInterval      time.Duration
-	CheckpointInterval      time.Duration
-	HoldExpiryInterval      time.Duration
-	ApprovalExpiryInterval  time.Duration
+	BatchCloseInterval     time.Duration
+	CheckpointInterval     time.Duration
+	HoldExpiryInterval     time.Duration
+	ApprovalExpiryInterval time.Duration
+}
+
+// AuthConfig configures gRPC authentication. When Enabled, every non-exempt
+// request must carry a valid bearer JWT, verified against the keys published at
+// JWKSURL. The principal is derived from the token's subject (sub) claim.
+type AuthConfig struct {
+	Enabled  bool
+	Method   string
+	JWKSURL  string
+	Audience string
+	Issuer   string
 }
 
 // RegisterFlags binds CLI flags to viper keys. Call this before New().
@@ -67,6 +79,11 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.Duration("worker-checkpoint-interval", 0, "Checkpoint build interval")
 	fs.Duration("worker-hold-expiry-interval", 0, "Hold expiry sweep interval")
 	fs.Duration("worker-approval-expiry-interval", 0, "Approval expiry interval")
+	fs.Bool("auth-enabled", false, "Require authenticated requests (JWT bearer tokens)")
+	fs.String("auth-method", "", "Authentication method (jwt)")
+	fs.String("auth-jwks-url", "", "JWKS URL used to verify JWT signatures")
+	fs.String("auth-audience", "", "Expected JWT audience (aud) claim; empty disables the check")
+	fs.String("auth-issuer", "", "Expected JWT issuer (iss) claim; empty disables the check")
 	fs.String("env-file", ".env", "Path to .env file (set to empty to disable)")
 }
 
@@ -91,6 +108,11 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 	v.SetDefault("worker.checkpoint_interval", 30*time.Second)
 	v.SetDefault("worker.hold_expiry_interval", 30*time.Second)
 	v.SetDefault("worker.approval_expiry_interval", 60*time.Second)
+	v.SetDefault("auth.enabled", false)
+	v.SetDefault("auth.method", "jwt")
+	v.SetDefault("auth.jwks_url", "")
+	v.SetDefault("auth.audience", "")
+	v.SetDefault("auth.issuer", "")
 
 	// --- Environment variables ---
 	v.SetEnvPrefix("LEDGER")
@@ -126,6 +148,11 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 		bindFlag(v, fs, "worker-checkpoint-interval", "worker.checkpoint_interval")
 		bindFlag(v, fs, "worker-hold-expiry-interval", "worker.hold_expiry_interval")
 		bindFlag(v, fs, "worker-approval-expiry-interval", "worker.approval_expiry_interval")
+		bindFlag(v, fs, "auth-enabled", "auth.enabled")
+		bindFlag(v, fs, "auth-method", "auth.method")
+		bindFlag(v, fs, "auth-jwks-url", "auth.jwks_url")
+		bindFlag(v, fs, "auth-audience", "auth.audience")
+		bindFlag(v, fs, "auth-issuer", "auth.issuer")
 	}
 
 	// --- Build config struct ---
@@ -151,6 +178,13 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 			CheckpointInterval:     v.GetDuration("worker.checkpoint_interval"),
 			HoldExpiryInterval:     v.GetDuration("worker.hold_expiry_interval"),
 			ApprovalExpiryInterval: v.GetDuration("worker.approval_expiry_interval"),
+		},
+		Auth: AuthConfig{
+			Enabled:  v.GetBool("auth.enabled"),
+			Method:   v.GetString("auth.method"),
+			JWKSURL:  v.GetString("auth.jwks_url"),
+			Audience: v.GetString("auth.audience"),
+			Issuer:   v.GetString("auth.issuer"),
 		},
 		Environment: v.GetString("environment"),
 		LogLevel:    v.GetString("log_level"),
@@ -198,6 +232,20 @@ func (c *Config) validate() error {
 	}
 	if c.Environment != "development" && strings.Contains(c.Postgres.DSN, "sslmode=disable") {
 		return fmt.Errorf("config: postgres.dsn uses sslmode=disable in %s environment; use sslmode=require or sslmode=verify-full", c.Environment)
+	}
+	if c.Auth.Enabled {
+		if c.Auth.Method != "jwt" {
+			return fmt.Errorf("config: auth.method must be \"jwt\" (the only supported method); got %q", c.Auth.Method)
+		}
+		if c.Auth.JWKSURL == "" {
+			return fmt.Errorf("config: auth.jwks_url is required when auth.enabled is true")
+		}
+		if c.Environment != "development" && !strings.HasPrefix(c.Auth.JWKSURL, "https://") {
+			return fmt.Errorf("config: auth.jwks_url must use https outside the development environment, got %q", c.Auth.JWKSURL)
+		}
+	}
+	if c.Environment == "production" && !c.Auth.Enabled {
+		return fmt.Errorf("config: auth.enabled must be true in the production environment")
 	}
 	return nil
 }
@@ -260,5 +308,6 @@ var Module = fx.Module("config",
 		func(c *Config) HTTPConfig { return c.HTTP },
 		func(c *Config) OTelConfig { return c.OTel },
 		func(c *Config) WorkerConfig { return c.Worker },
+		func(c *Config) AuthConfig { return c.Auth },
 	),
 )
