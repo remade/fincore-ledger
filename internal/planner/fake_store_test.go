@@ -35,7 +35,9 @@ type fakeStore struct {
 	holdRecords    map[string]*storage.HoldRecord        // ledger|holdID
 	txByID         map[string]*storage.TransactionRecord // ledger|txID
 	relationships  []storage.RelationshipRecord
-	accountRecords map[string]*storage.AccountRecord // ledger|address
+	accountRecords map[string]*storage.AccountRecord         // ledger|address
+	activePolicy   *storage.PolicyRecord                     // nil => unrestricted
+	approvals      map[string]*storage.PendingApprovalRecord // ledger|intentID
 }
 
 type balance struct{ input, output *big.Int }
@@ -55,7 +57,73 @@ func newFakeStore() *fakeStore {
 		holdRecords:    map[string]*storage.HoldRecord{},
 		txByID:         map[string]*storage.TransactionRecord{},
 		accountRecords: map[string]*storage.AccountRecord{},
+		approvals:      map[string]*storage.PendingApprovalRecord{},
 	}
+}
+
+// --- approvals (storage.Store + storage.TxStore methods) ---
+
+func (s *fakeStore) InsertPendingApproval(_ context.Context, a storage.PendingApprovalRecord) error {
+	rec := a
+	s.approvals[a.LedgerID+"|"+a.IntentID] = &rec
+	return nil
+}
+
+func (s *fakeStore) UpdateApprovalState(_ context.Context, ledgerID, intentID, state string) error {
+	if a, ok := s.approvals[ledgerID+"|"+intentID]; ok {
+		a.State = state
+	}
+	return nil
+}
+
+func (t *fakeTx) GetPendingApproval(_ context.Context, ledgerID, intentID string) (*storage.PendingApprovalRecord, error) {
+	if a, ok := t.parent.approvals[ledgerID+"|"+intentID]; ok {
+		cp := *a
+		cp.ReceivedApprovals = append([]storage.ApprovalEntry(nil), a.ReceivedApprovals...)
+		return &cp, nil
+	}
+	return nil, fmt.Errorf("%w: approval %q", storage.ErrNotFound, intentID)
+}
+
+func (t *fakeTx) AddApproval(_ context.Context, ledgerID, intentID, principal, signature string) error {
+	// Applied immediately (not buffered) so the in-tx re-read sees it, matching
+	// the real FOR UPDATE flow where the write is visible within the same tx.
+	if a, ok := t.parent.approvals[ledgerID+"|"+intentID]; ok {
+		a.ReceivedApprovals = append(a.ReceivedApprovals, storage.ApprovalEntry{Principal: principal, Signature: signature})
+	}
+	return nil
+}
+
+func (t *fakeTx) UpdateApprovalState(_ context.Context, ledgerID, intentID, state string) error {
+	if a, ok := t.parent.approvals[ledgerID+"|"+intentID]; ok {
+		a.State = state
+	}
+	return nil
+}
+
+func (t *fakeTx) MarkApprovalExecuting(_ context.Context, ledgerID, intentID string) error {
+	if a, ok := t.parent.approvals[ledgerID+"|"+intentID]; ok {
+		a.State = "executing"
+	}
+	return nil
+}
+
+func (s *fakeStore) UpdateApprovalStateIf(_ context.Context, ledgerID, intentID, fromState, toState string) (bool, error) {
+	if a, ok := s.approvals[ledgerID+"|"+intentID]; ok && a.State == fromState {
+		a.State = toState
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *fakeStore) ListLogEventsByIdempotencyKey(_ context.Context, ledgerID, key string) ([]storage.LogEventRecord, error) {
+	var out []storage.LogEventRecord
+	for _, e := range s.events {
+		if e.LedgerID == ledgerID && e.IdempotencyKey == key {
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }
 
 func (s *fakeStore) addTransaction(rec *storage.TransactionRecord) {
@@ -106,7 +174,11 @@ func (s *fakeStore) GetIdempotencyKey(_ context.Context, ledgerID, key string) (
 }
 
 func (s *fakeStore) GetActivePolicy(context.Context, string) (*storage.PolicyRecord, error) {
-	return nil, nil // no policy => unrestricted
+	return s.activePolicy, nil // nil => unrestricted
+}
+
+func (s *fakeStore) setActivePolicy(cedar string) {
+	s.activePolicy = &storage.PolicyRecord{LedgerID: "L1", Version: "v1", CedarPolicy: cedar, Active: true}
 }
 
 func (s *fakeStore) getBalance(ledger, account, asset string) *balance {
