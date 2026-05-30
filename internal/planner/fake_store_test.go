@@ -31,24 +31,36 @@ type fakeStore struct {
 	ikSeen       map[string]bool // ledger|idempotency_key (uniqueness)
 	txByRef      map[string]bool // ledger|reference (reference-conflict)
 	transactions []storage.TransactionRecord
-	accounts     map[string]bool // ledger|address
+	accounts     map[string]bool                // ledger|address
+	holdRecords  map[string]*storage.HoldRecord // ledger|holdID
 }
 
 type balance struct{ input, output *big.Int }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		ledgers:   map[string]*storage.LedgerRecord{},
-		schemas:   map[string]*storage.SchemaRecord{},
-		seq:       map[string]int64{},
-		balances:  map[string]*balance{},
-		holds:     map[string]*big.Int{},
-		ikRecords: map[string]*storage.IdempotencyKeyRecord{},
-		eventIDs:  map[string]bool{},
-		ikSeen:    map[string]bool{},
-		txByRef:   map[string]bool{},
-		accounts:  map[string]bool{},
+		ledgers:     map[string]*storage.LedgerRecord{},
+		schemas:     map[string]*storage.SchemaRecord{},
+		seq:         map[string]int64{},
+		balances:    map[string]*balance{},
+		holds:       map[string]*big.Int{},
+		ikRecords:   map[string]*storage.IdempotencyKeyRecord{},
+		eventIDs:    map[string]bool{},
+		ikSeen:      map[string]bool{},
+		txByRef:     map[string]bool{},
+		accounts:    map[string]bool{},
+		holdRecords: map[string]*storage.HoldRecord{},
 	}
+}
+
+func (s *fakeStore) addHold(rec *storage.HoldRecord) {
+	s.holdRecords[rec.LedgerID+"|"+rec.HoldID] = rec
+	// Reflect the reservation in the active-holds total.
+	k := balKey(rec.LedgerID, rec.Source, rec.Asset)
+	if s.holds[k] == nil {
+		s.holds[k] = big.NewInt(0)
+	}
+	s.holds[k].Add(s.holds[k], new(big.Int).Sub(rec.AuthorizedAmount, rec.CapturedAmount))
 }
 
 func balKey(ledger, account, asset string) string { return ledger + "|" + account + "|" + asset }
@@ -192,6 +204,51 @@ func (t *fakeTx) InsertIdempotencyKey(_ context.Context, r storage.IdempotencyKe
 	}
 	rec := r
 	t.pending = append(t.pending, func() { t.parent.ikRecords[r.LedgerID+"|"+r.IdempotencyKey] = &rec })
+	return nil
+}
+
+func (t *fakeTx) GetHold(_ context.Context, ledgerID, holdID string) (*storage.HoldRecord, error) {
+	if r, ok := t.parent.holdRecords[ledgerID+"|"+holdID]; ok {
+		cp := *r // shallow copy; callers read only
+		return &cp, nil
+	}
+	return nil, fmt.Errorf("%w: hold %q", storage.ErrNotFound, holdID)
+}
+
+func (t *fakeTx) InsertHold(_ context.Context, h storage.HoldRecord) error {
+	rec := h
+	t.pending = append(t.pending, func() {
+		t.parent.holdRecords[h.LedgerID+"|"+h.HoldID] = &rec
+		k := balKey(h.LedgerID, h.Source, h.Asset)
+		if t.parent.holds[k] == nil {
+			t.parent.holds[k] = big.NewInt(0)
+		}
+		t.parent.holds[k].Add(t.parent.holds[k], new(big.Int).Sub(h.AuthorizedAmount, h.CapturedAmount))
+	})
+	return nil
+}
+
+func (t *fakeTx) UpdateHoldCaptured(_ context.Context, ledgerID, holdID string, delta *big.Int) error {
+	t.pending = append(t.pending, func() {
+		if r, ok := t.parent.holdRecords[ledgerID+"|"+holdID]; ok {
+			r.CapturedAmount = new(big.Int).Add(r.CapturedAmount, delta)
+			if cur := t.parent.holds[balKey(ledgerID, r.Source, r.Asset)]; cur != nil {
+				cur.Sub(cur, delta)
+			}
+		}
+	})
+	return nil
+}
+
+func (t *fakeTx) VoidHold(_ context.Context, ledgerID, holdID string) error {
+	t.pending = append(t.pending, func() {
+		if r, ok := t.parent.holdRecords[ledgerID+"|"+holdID]; ok {
+			r.Voided = true
+			if cur := t.parent.holds[balKey(ledgerID, r.Source, r.Asset)]; cur != nil {
+				cur.Sub(cur, new(big.Int).Sub(r.AuthorizedAmount, r.CapturedAmount))
+			}
+		}
+	})
 	return nil
 }
 

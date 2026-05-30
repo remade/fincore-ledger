@@ -271,202 +271,22 @@ func (p *Planner) executeDeleteMetadataInTx(ctx context.Context, txStore storage
 }
 
 func (p *Planner) executeAuthorizeInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
-	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-	holdID := ulid.Make().String()
-
 	ledger, err := txStore.GetLedger(ctx, ledgerID)
 	if err != nil {
 		return nil, err
 	}
-
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	bal, err := txStore.GetBalance(ctx, ledgerID, intent.Source, intent.Asset, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	postedBalance := new(big.Int).Sub(bal.Input, bal.Output)
-
-	activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, intent.Source, intent.Asset)
-	if err != nil {
-		return nil, err
-	}
-	availableBalance := new(big.Int).Sub(postedBalance, activeHolds)
-
-	if !accounts.IsIssuer(intent.Source, ledger.IssuerAccounts) && availableBalance.Cmp(intent.Amount) < 0 {
-		return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, intent.Source, intent.Asset)
-	}
-
-	payload, err := json.Marshal(map[string]string{
-		"hold_id": holdID, "source": intent.Source, "destination_hint": intent.DestinationHint,
-		"amount": intent.Amount.String(), "asset": intent.Asset,
-		"expires_at": intent.ExpiresAt.Format(time.RFC3339Nano),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling payload: %w", err)
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldCreated,
-		Payload: payload, BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.InsertHold(ctx, storage.HoldRecord{
-		LedgerID: ledgerID, HoldID: holdID, Source: intent.Source,
-		DestinationHint: intent.DestinationHint, Asset: intent.Asset,
-		AuthorizedAmount: intent.Amount, CapturedAmount: new(big.Int),
-		ExpiresAt: intent.ExpiresAt, AuthorizedEventID: eventID,
-		ValidTime: now, SystemTime: now,
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
-		LedgerID: ledgerID, Address: intent.Source, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
-	}); err != nil {
-		return nil, err
-	}
-
-	return &SubmitResult{EventID: eventID, HoldID: holdID}, nil
+	now := time.Now().UTC()
+	return p.doAuthorizeInTx(ctx, txStore, ledger, intent.Source, intent.DestinationHint, intent.Asset, intent.Amount, intent.ExpiresAt, "", nil, now)
 }
 
 func (p *Planner) executeCaptureInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
 	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	hold, err := txStore.GetHold(ctx, ledgerID, intent.HoldID)
-	if err != nil {
-		return nil, err
-	}
-	if hold.Voided {
-		return nil, fmt.Errorf("%w: %s", storage.ErrHoldVoided, intent.HoldID)
-	}
-	if hold.Expired {
-		return nil, fmt.Errorf("%w: %s", storage.ErrHoldExpired, intent.HoldID)
-	}
-
-	remaining := new(big.Int).Sub(hold.AuthorizedAmount, hold.CapturedAmount)
-	if intent.Amount.Cmp(remaining) > 0 {
-		return nil, fmt.Errorf("%w: capture %s exceeds remaining %s on hold %s",
-			storage.ErrInsufficientFunds, intent.Amount, remaining, intent.HoldID)
-	}
-
-	dest := intent.Destination
-	if dest == "" {
-		dest = hold.DestinationHint
-	}
-	if dest == "" {
-		return nil, fmt.Errorf("destination required for capture (no destination_hint on hold)")
-	}
-
-	payload, err := json.Marshal(map[string]string{
-		"hold_id": intent.HoldID, "amount": intent.Amount.String(), "destination": dest,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling payload: %w", err)
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldConfirmed,
-		Payload: payload, BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.UpdateHoldCaptured(ctx, ledgerID, intent.HoldID, intent.Amount); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-		LedgerID: ledgerID, Account: hold.Source, Asset: hold.Asset,
-		EventID: eventID, ValidTime: now, SystemTime: now,
-		InputDelta: big.NewInt(0), OutputDelta: intent.Amount,
-	}); err != nil {
-		return nil, err
-	}
-	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-		LedgerID: ledgerID, Account: dest, Asset: hold.Asset,
-		EventID: eventID, ValidTime: now, SystemTime: now,
-		InputDelta: intent.Amount, OutputDelta: big.NewInt(0),
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
-		LedgerID: ledgerID, Address: dest, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
-	}); err != nil {
-		return nil, err
-	}
-
-	return &SubmitResult{EventID: eventID}, nil
+	return p.doCaptureInTx(ctx, txStore, ledgerID, intent.HoldID, intent.Amount, intent.Destination, "", nil, now)
 }
 
 func (p *Planner) executeVoidInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
 	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	hold, err := txStore.GetHold(ctx, ledgerID, intent.HoldID)
-	if err != nil {
-		return nil, err
-	}
-	if hold.Voided {
-		return nil, fmt.Errorf("%w: %s", storage.ErrHoldVoided, intent.HoldID)
-	}
-	if hold.Expired {
-		return nil, fmt.Errorf("%w: %s", storage.ErrHoldExpired, intent.HoldID)
-	}
-
-	payload, err := json.Marshal(map[string]string{"hold_id": intent.HoldID})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling payload: %w", err)
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldVoided,
-		Payload: payload, BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.VoidHold(ctx, ledgerID, intent.HoldID); err != nil {
-		return nil, err
-	}
-
-	return &SubmitResult{EventID: eventID}, nil
+	return p.doVoidInTx(ctx, txStore, ledgerID, intent.HoldID, "", nil, now)
 }
 
 func (p *Planner) executeRevertInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {

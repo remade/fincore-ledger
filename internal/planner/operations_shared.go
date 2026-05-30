@@ -415,3 +415,230 @@ func (p *Planner) doConvertInTx(ctx context.Context, txStore storage.TxStore, le
 
 	return &SubmitResult{EventID: eventID, ConversionID: conversionID}, nil
 }
+
+// doAuthorizeInTx is the shared core of an authorization (hold). It validates
+// the amount, checks available balance (posted minus active holds) unless the
+// source is an issuer, writes the event, inserts the hold, and upserts the
+// source account.
+func (p *Planner) doAuthorizeInTx(ctx context.Context, txStore storage.TxStore, ledger *storage.LedgerRecord, source, destHint, asset string, amount *big.Int, expiresAt time.Time, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("authorize amount must be positive")
+	}
+
+	eventID := ulid.Make().String()
+	holdID := ulid.Make().String()
+	batchID, err := p.batch.CurrentBatchID(ctx, ledger.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+	seq, err := txStore.NextLedgerSeq(ctx, ledger.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	bal, err := txStore.GetBalance(ctx, ledger.ID, source, asset, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	postedBalance := new(big.Int).Sub(bal.Input, bal.Output)
+	activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledger.ID, source, asset)
+	if err != nil {
+		return nil, err
+	}
+	availableBalance := new(big.Int).Sub(postedBalance, activeHolds)
+	if !accounts.IsIssuer(source, ledger.IssuerAccounts) && availableBalance.Cmp(amount) < 0 {
+		return nil, fmt.Errorf("%w: account %s, asset %s (available: %s, requested: %s)",
+			storage.ErrInsufficientFunds, source, asset, availableBalance, amount)
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"hold_id": holdID, "source": source, "destination_hint": destHint,
+		"amount": amount.String(), "asset": asset,
+		"expires_at": expiresAt.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	logEvent := storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledger.ID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldCreated,
+		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
+	}
+	if idempotencyKey != "" && ikHash != nil {
+		logEvent.IdempotencyHash = ikHash
+	}
+	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.InsertHold(ctx, storage.HoldRecord{
+		LedgerID: ledger.ID, HoldID: holdID, Source: source,
+		DestinationHint: destHint, Asset: asset,
+		AuthorizedAmount: amount, CapturedAmount: new(big.Int),
+		ExpiresAt: expiresAt, AuthorizedEventID: eventID,
+		ValidTime: now, SystemTime: now,
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+		LedgerID: ledger.ID, Address: source, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
+	}); err != nil {
+		return nil, fmt.Errorf("upserting source account: %w", err)
+	}
+
+	if idempotencyKey != "" && ikHash != nil {
+		if err := p.recordIdempotency(ctx, txStore, ledger.ID, idempotencyKey, eventID, ikHash); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID, HoldID: holdID}, nil
+}
+
+// doCaptureInTx is the shared core of a hold capture: re-reads the hold (TOCTOU),
+// rejects voided/expired/over-capture, writes the event, advances captured
+// amount, and moves funds source -> destination.
+func (p *Planner) doCaptureInTx(ctx context.Context, txStore storage.TxStore, ledgerID, holdID string, amount *big.Int, destination, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
+	eventID := ulid.Make().String()
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	hold, err := txStore.GetHold(ctx, ledgerID, holdID)
+	if err != nil {
+		return nil, err
+	}
+	if hold.Voided {
+		return nil, fmt.Errorf("%w: %s", storage.ErrHoldVoided, holdID)
+	}
+	if hold.Expired {
+		return nil, fmt.Errorf("%w: %s", storage.ErrHoldExpired, holdID)
+	}
+
+	remaining := new(big.Int).Sub(hold.AuthorizedAmount, hold.CapturedAmount)
+	if amount.Cmp(remaining) > 0 {
+		return nil, fmt.Errorf("%w: capture %s exceeds remaining %s on hold %s",
+			storage.ErrInsufficientFunds, amount, remaining, holdID)
+	}
+
+	dest := destination
+	if dest == "" {
+		dest = hold.DestinationHint
+	}
+	if dest == "" {
+		return nil, fmt.Errorf("destination required for capture (no destination_hint on hold)")
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"hold_id": holdID, "amount": amount.String(), "destination": dest,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	logEvent := storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldConfirmed,
+		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
+	}
+	if idempotencyKey != "" && ikHash != nil {
+		logEvent.IdempotencyHash = ikHash
+	}
+	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.UpdateHoldCaptured(ctx, ledgerID, holdID, amount); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+		LedgerID: ledgerID, Account: hold.Source, Asset: hold.Asset,
+		EventID: eventID, ValidTime: now, SystemTime: now,
+		InputDelta: big.NewInt(0), OutputDelta: amount,
+	}); err != nil {
+		return nil, err
+	}
+	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+		LedgerID: ledgerID, Account: dest, Asset: hold.Asset,
+		EventID: eventID, ValidTime: now, SystemTime: now,
+		InputDelta: amount, OutputDelta: big.NewInt(0),
+	}); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+		LedgerID: ledgerID, Address: dest, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
+	}); err != nil {
+		return nil, fmt.Errorf("upserting destination account: %w", err)
+	}
+
+	if idempotencyKey != "" && ikHash != nil {
+		if err := p.recordIdempotency(ctx, txStore, ledgerID, idempotencyKey, eventID, ikHash); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
+
+// doVoidInTx is the shared core of a hold void: re-reads the hold, rejects
+// voided/expired, writes the event, and releases the hold.
+func (p *Planner) doVoidInTx(ctx context.Context, txStore storage.TxStore, ledgerID, holdID, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
+	eventID := ulid.Make().String()
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	hold, err := txStore.GetHold(ctx, ledgerID, holdID)
+	if err != nil {
+		return nil, err
+	}
+	if hold.Voided {
+		return nil, fmt.Errorf("%w: %s", storage.ErrHoldVoided, holdID)
+	}
+	if hold.Expired {
+		return nil, fmt.Errorf("%w: %s", storage.ErrHoldExpired, holdID)
+	}
+
+	payload, err := json.Marshal(map[string]string{"hold_id": holdID})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	logEvent := storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldVoided,
+		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
+	}
+	if idempotencyKey != "" && ikHash != nil {
+		logEvent.IdempotencyHash = ikHash
+	}
+	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+		return nil, err
+	}
+
+	if err := txStore.VoidHold(ctx, ledgerID, holdID); err != nil {
+		return nil, err
+	}
+
+	if idempotencyKey != "" && ikHash != nil {
+		if err := p.recordIdempotency(ctx, txStore, ledgerID, idempotencyKey, eventID, ikHash); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
