@@ -2,12 +2,9 @@ package planner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math/big"
 	"time"
-
-	"github.com/oklog/ulid/v2"
 
 	"github.com/remade/ledger/internal/storage"
 )
@@ -188,84 +185,12 @@ func (p *Planner) executePostInTx(ctx context.Context, txStore storage.TxStore, 
 
 func (p *Planner) executeSetMetadataInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
 	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	payload, err := json.Marshal(map[string]any{
-		"target_type": intent.TargetType, "target_id": intent.TargetID, "metadata": intent.Metadata,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeMetadataSet,
-		Payload: payload, BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
-		return nil, err
-	}
-
-	if intent.TargetType == 0 { // ACCOUNT
-		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
-			LedgerID: ledgerID, Address: intent.TargetID, FirstUsage: now, UpdatedAt: now, Metadata: intent.Metadata,
-		}); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := txStore.UpdateTransactionMetadata(ctx, ledgerID, intent.TargetID, intent.Metadata); err != nil {
-			return nil, err
-		}
-	}
-
-	return &SubmitResult{EventID: eventID}, nil
+	return p.doSetMetadataInTx(ctx, txStore, ledgerID, intent.TargetType, intent.TargetID, intent.Metadata, "", nil, now)
 }
 
 func (p *Planner) executeDeleteMetadataInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
 	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	payload, err := json.Marshal(map[string]any{
-		"target_type": intent.TargetType, "target_id": intent.TargetID, "key": intent.MetadataKey,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeMetadataDeleted,
-		Payload: payload, BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
-		return nil, err
-	}
-
-	if intent.TargetType == 1 { // TRANSACTION
-		if err := txStore.DeleteTransactionMetadataKey(ctx, ledgerID, intent.TargetID, intent.MetadataKey); err != nil {
-			return nil, err
-		}
-	}
-
-	return &SubmitResult{EventID: eventID}, nil
+	return p.doDeleteMetadataInTx(ctx, txStore, ledgerID, intent.TargetType, intent.TargetID, intent.MetadataKey, "", nil, now)
 }
 
 func (p *Planner) executeAuthorizeInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {

@@ -20,39 +20,41 @@ import (
 type fakeStore struct {
 	storage.Store
 
-	ledgers       map[string]*storage.LedgerRecord
-	schemas       map[string]*storage.SchemaRecord // key: ledger|version
-	seq           map[string]int64
-	balances      map[string]*balance                      // key: ledger|account|asset
-	holds         map[string]*big.Int                      // key: ledger|account|asset
-	ikRecords     map[string]*storage.IdempotencyKeyRecord // key: ledger|key
-	events        []storage.LogEventRecord
-	eventIDs      map[string]bool // ledger|event_id
-	ikSeen        map[string]bool // ledger|idempotency_key (uniqueness)
-	txByRef       map[string]bool // ledger|reference (reference-conflict)
-	transactions  []storage.TransactionRecord
-	accounts      map[string]bool                       // ledger|address
-	holdRecords   map[string]*storage.HoldRecord        // ledger|holdID
-	txByID        map[string]*storage.TransactionRecord // ledger|txID
-	relationships []storage.RelationshipRecord
+	ledgers        map[string]*storage.LedgerRecord
+	schemas        map[string]*storage.SchemaRecord // key: ledger|version
+	seq            map[string]int64
+	balances       map[string]*balance                      // key: ledger|account|asset
+	holds          map[string]*big.Int                      // key: ledger|account|asset
+	ikRecords      map[string]*storage.IdempotencyKeyRecord // key: ledger|key
+	events         []storage.LogEventRecord
+	eventIDs       map[string]bool // ledger|event_id
+	ikSeen         map[string]bool // ledger|idempotency_key (uniqueness)
+	txByRef        map[string]bool // ledger|reference (reference-conflict)
+	transactions   []storage.TransactionRecord
+	accounts       map[string]bool                       // ledger|address
+	holdRecords    map[string]*storage.HoldRecord        // ledger|holdID
+	txByID         map[string]*storage.TransactionRecord // ledger|txID
+	relationships  []storage.RelationshipRecord
+	accountRecords map[string]*storage.AccountRecord // ledger|address
 }
 
 type balance struct{ input, output *big.Int }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		ledgers:     map[string]*storage.LedgerRecord{},
-		schemas:     map[string]*storage.SchemaRecord{},
-		seq:         map[string]int64{},
-		balances:    map[string]*balance{},
-		holds:       map[string]*big.Int{},
-		ikRecords:   map[string]*storage.IdempotencyKeyRecord{},
-		eventIDs:    map[string]bool{},
-		ikSeen:      map[string]bool{},
-		txByRef:     map[string]bool{},
-		accounts:    map[string]bool{},
-		holdRecords: map[string]*storage.HoldRecord{},
-		txByID:      map[string]*storage.TransactionRecord{},
+		ledgers:        map[string]*storage.LedgerRecord{},
+		schemas:        map[string]*storage.SchemaRecord{},
+		seq:            map[string]int64{},
+		balances:       map[string]*balance{},
+		holds:          map[string]*big.Int{},
+		ikRecords:      map[string]*storage.IdempotencyKeyRecord{},
+		eventIDs:       map[string]bool{},
+		ikSeen:         map[string]bool{},
+		txByRef:        map[string]bool{},
+		accounts:       map[string]bool{},
+		holdRecords:    map[string]*storage.HoldRecord{},
+		txByID:         map[string]*storage.TransactionRecord{},
+		accountRecords: map[string]*storage.AccountRecord{},
 	}
 }
 
@@ -235,7 +237,36 @@ func (t *fakeTx) InsertVolumeDelta(_ context.Context, d storage.VolumeDeltaRecor
 }
 
 func (t *fakeTx) UpsertAccount(_ context.Context, a storage.AccountRecord) error {
-	t.pending = append(t.pending, func() { t.parent.accounts[a.LedgerID+"|"+a.Address] = true })
+	rec := a
+	t.pending = append(t.pending, func() {
+		t.parent.accounts[a.LedgerID+"|"+a.Address] = true
+		t.parent.accountRecords[a.LedgerID+"|"+a.Address] = &rec
+	})
+	return nil
+}
+
+func (t *fakeTx) GetAccount(_ context.Context, ledgerID, address string) (*storage.AccountRecord, error) {
+	r, ok := t.parent.accountRecords[ledgerID+"|"+address]
+	if !ok {
+		return nil, fmt.Errorf("%w: account %q", storage.ErrNotFound, address)
+	}
+	cp := *r
+	if r.Metadata != nil {
+		m := make(map[string]any, len(r.Metadata))
+		for k, v := range r.Metadata {
+			m[k] = v
+		}
+		cp.Metadata = m
+	}
+	return &cp, nil
+}
+
+func (t *fakeTx) DeleteTransactionMetadataKey(_ context.Context, ledgerID, txID, key string) error {
+	t.pending = append(t.pending, func() {
+		if r, ok := t.parent.txByID[ledgerID+"|"+txID]; ok && r.Metadata != nil {
+			delete(r.Metadata, key)
+		}
+	})
 	return nil
 }
 

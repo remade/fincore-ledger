@@ -860,6 +860,159 @@ func (p *Planner) doAmendInTx(ctx context.Context, txStore storage.TxStore, ledg
 	return &SubmitResult{EventID: eventID}, nil
 }
 
+// doSetMetadataInTx is the shared core of a set-metadata operation. Used by both
+// the standalone and batch paths; the batch path now also records metadata
+// history (previously skipped), keeping the two consistent.
+func (p *Planner) doSetMetadataInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, targetType int16, targetID string, metadata map[string]any, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
+	eventID := ulid.Make().String()
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"target_type": targetType, "target_id": targetID, "metadata": metadata,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	logEvent := storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeMetadataSet,
+		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
+	}
+	if idempotencyKey != "" && ikHash != nil {
+		logEvent.IdempotencyHash = ikHash
+	}
+	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+		return nil, err
+	}
+
+	if targetType == 0 { // ACCOUNT
+		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+			LedgerID: ledgerID, Address: targetID, FirstUsage: now, UpdatedAt: now, Metadata: metadata,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if targetType == 1 { // TRANSACTION
+		if err := txStore.UpdateTransactionMetadata(ctx, ledgerID, targetID, metadata); err != nil {
+			return nil, fmt.Errorf("updating transaction metadata: %w", err)
+		}
+	}
+
+	if err := txStore.InsertMetadataHistory(ctx, storage.MetadataHistoryRecord{
+		LedgerID: ledgerID, TargetType: targetType, TargetID: targetID, Revision: seq,
+		Metadata: metadata, EventID: eventID, SystemTime: now,
+	}); err != nil {
+		return nil, err
+	}
+
+	if idempotencyKey != "" && ikHash != nil {
+		if err := p.recordIdempotency(ctx, txStore, ledgerID, idempotencyKey, eventID, ikHash); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
+
+// doDeleteMetadataInTx is the shared core of a delete-metadata operation. The
+// batch path now performs the account-key removal + history snapshot it
+// previously skipped.
+func (p *Planner) doDeleteMetadataInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, targetType int16, targetID, key, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
+	eventID := ulid.Make().String()
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return nil, err
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"target_type": targetType, "target_id": targetID, "key": key,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	logEvent := storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeMetadataDeleted,
+		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
+	}
+	if idempotencyKey != "" && ikHash != nil {
+		logEvent.IdempotencyHash = ikHash
+	}
+	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+		return nil, err
+	}
+
+	if targetType == 0 { // ACCOUNT
+		acct, err := txStore.GetAccount(ctx, ledgerID, targetID)
+		if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return nil, err
+		}
+		if acct != nil {
+			delete(acct.Metadata, key)
+			acct.UpdatedAt = now
+			if err := txStore.UpsertAccount(ctx, *acct); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if targetType == 1 { // TRANSACTION
+		if err := txStore.DeleteTransactionMetadataKey(ctx, ledgerID, targetID, key); err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return nil, fmt.Errorf("deleting transaction metadata key: %w", err)
+		}
+	}
+
+	// Snapshot the post-deletion metadata for history.
+	var currentMetadata map[string]any
+	switch targetType {
+	case 0:
+		acctAfter, err := txStore.GetAccount(ctx, ledgerID, targetID)
+		if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return nil, err
+		}
+		if acctAfter != nil {
+			currentMetadata = acctAfter.Metadata
+		}
+	case 1:
+		txRec, err := txStore.GetTransaction(ctx, ledgerID, targetID)
+		if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			return nil, err
+		}
+		if txRec != nil {
+			currentMetadata = txRec.Metadata
+		}
+	}
+	if currentMetadata == nil {
+		currentMetadata = map[string]any{}
+	}
+	if err := txStore.InsertMetadataHistory(ctx, storage.MetadataHistoryRecord{
+		LedgerID: ledgerID, TargetType: targetType, TargetID: targetID, Revision: seq,
+		Metadata: currentMetadata, EventID: eventID, SystemTime: now,
+	}); err != nil {
+		return nil, err
+	}
+
+	if idempotencyKey != "" && ikHash != nil {
+		if err := p.recordIdempotency(ctx, txStore, ledgerID, idempotencyKey, eventID, ikHash); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID}, nil
+}
+
 // doVoidInTx is the shared core of a hold void: re-reads the hold, rejects
 // voided/expired, writes the event, and releases the hold.
 func (p *Planner) doVoidInTx(ctx context.Context, txStore storage.TxStore, ledgerID, holdID, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
