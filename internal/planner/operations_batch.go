@@ -706,154 +706,15 @@ func (p *Planner) executeConvertInTx(ctx context.Context, txStore storage.TxStor
 	}
 	params := *intent.ConvertParams
 
-	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-	conversionID := ulid.Make().String()
-	txID := ulid.Make().String()
-
 	ledger, err := txStore.GetLedger(ctx, ledgerID)
 	if err != nil {
 		return nil, err
 	}
-
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
+	now := time.Now().UTC()
 	vt := now
 	if params.ValidTime != nil {
 		vt = *params.ValidTime
 	}
-
-	// Balance check with slippage.
-	if !accounts.IsIssuer(params.Source, ledger.IssuerAccounts) {
-		bal, err := txStore.GetBalance(ctx, ledgerID, params.Source, params.SourceAsset, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		current := new(big.Int).Sub(bal.Input, bal.Output)
-		activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, params.Source, params.SourceAsset)
-		if err != nil {
-			return nil, err
-		}
-		current.Sub(current, activeHolds)
-
-		totalSourceOutput := new(big.Int).Set(params.SourceAmount)
-		if params.SlippageAmount != nil && params.SlippageAmount.Sign() > 0 {
-			totalSourceOutput.Add(totalSourceOutput, params.SlippageAmount)
-		}
-		if current.Cmp(totalSourceOutput) < 0 {
-			return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, params.Source, params.SourceAsset)
-		}
-	}
-
-	payload, err := json.Marshal(map[string]string{
-		"conversion_id": conversionID, "source": params.Source, "destination": params.Destination,
-		"source_amount": params.SourceAmount.String(), "source_asset": params.SourceAsset,
-		"destination_amount": params.DestAmount.String(), "destination_asset": params.DestAsset,
-		"rate": params.Rate, "rate_source": params.RateSource,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: vt, Type: storage.EventTypeConversionCreated,
-		Payload: payload, BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
-		return nil, err
-	}
-
-	// Leg 1: source sends source_asset to destination.
-	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-		LedgerID: ledgerID, Account: params.Source, Asset: params.SourceAsset,
-		EventID: eventID, ValidTime: vt, SystemTime: now,
-		InputDelta: big.NewInt(0), OutputDelta: params.SourceAmount,
-	}); err != nil {
-		return nil, err
-	}
-	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-		LedgerID: ledgerID, Account: params.Destination, Asset: params.SourceAsset,
-		EventID: eventID, ValidTime: vt, SystemTime: now,
-		InputDelta: params.SourceAmount, OutputDelta: big.NewInt(0),
-	}); err != nil {
-		return nil, err
-	}
-
-	// Leg 2: destination sends dest_asset to source.
-	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-		LedgerID: ledgerID, Account: params.Destination, Asset: params.DestAsset,
-		EventID: eventID, ValidTime: vt, SystemTime: now,
-		InputDelta: big.NewInt(0), OutputDelta: params.DestAmount,
-	}); err != nil {
-		return nil, err
-	}
-	if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-		LedgerID: ledgerID, Account: params.Source, Asset: params.DestAsset,
-		EventID: eventID, ValidTime: vt, SystemTime: now,
-		InputDelta: params.DestAmount, OutputDelta: big.NewInt(0),
-	}); err != nil {
-		return nil, err
-	}
-
-	// Optional slippage.
-	if params.SlippageAmount != nil && params.SlippageAmount.Sign() > 0 && params.SlippageAccount != "" {
-		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-			LedgerID: ledgerID, Account: params.Source, Asset: params.SourceAsset,
-			EventID: eventID, ValidTime: vt, SystemTime: now,
-			InputDelta: big.NewInt(0), OutputDelta: params.SlippageAmount,
-		}); err != nil {
-			return nil, err
-		}
-		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-			LedgerID: ledgerID, Account: params.SlippageAccount, Asset: params.SourceAsset,
-			EventID: eventID, ValidTime: vt, SystemTime: now,
-			InputDelta: params.SlippageAmount, OutputDelta: big.NewInt(0),
-		}); err != nil {
-			return nil, err
-		}
-		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
-			LedgerID: ledgerID, Address: params.SlippageAccount, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
-		}); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
-		LedgerID: ledgerID, Address: params.Source, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
-	}); err != nil {
-		return nil, err
-	}
-	if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
-		LedgerID: ledgerID, Address: params.Destination, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
-	}); err != nil {
-		return nil, err
-	}
-
-	postingRecords := []map[string]any{
-		{"source": params.Source, "destination": params.Destination, "amount": params.SourceAmount.String(), "asset": params.SourceAsset},
-		{"source": params.Destination, "destination": params.Source, "amount": params.DestAmount.String(), "asset": params.DestAsset},
-	}
-	if params.SlippageAmount != nil && params.SlippageAmount.Sign() > 0 && params.SlippageAccount != "" {
-		postingRecords = append(postingRecords, map[string]any{
-			"source": params.Source, "destination": params.SlippageAccount,
-			"amount": params.SlippageAmount.String(), "asset": params.SourceAsset,
-		})
-	}
-	if err := txStore.InsertTransaction(ctx, storage.TransactionRecord{
-		LedgerID: ledgerID, TransactionID: txID, EventID: eventID,
-		ValidTime: vt, SystemTime: now, Postings: postingRecords,
-		Metadata: map[string]any{"type": "conversion", "rate": params.Rate, "rate_source": params.RateSource},
-	}); err != nil {
-		return nil, err
-	}
-
-	return &SubmitResult{EventID: eventID, ConversionID: conversionID}, nil
+	// Batch convert events carry no idempotency key (ikHash nil), matching prior behavior.
+	return p.doConvertInTx(ctx, txStore, ledger, params, "", nil, vt, now)
 }

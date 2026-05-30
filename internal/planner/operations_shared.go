@@ -250,3 +250,168 @@ func (p *Planner) doPostInTx(ctx context.Context, txStore storage.TxStore, ledge
 
 	return &SubmitResult{EventID: eventID, Transaction: &txRec}, nil
 }
+
+// validateConvertParams checks the structural validity of a conversion.
+func validateConvertParams(params ConvertParams) error {
+	if err := accounts.Validate(params.Source); err != nil {
+		return fmt.Errorf("source: %w", err)
+	}
+	if err := accounts.Validate(params.Destination); err != nil {
+		return fmt.Errorf("destination: %w", err)
+	}
+	if err := assets.Validate(params.SourceAsset); err != nil {
+		return fmt.Errorf("source_asset: %w", err)
+	}
+	if err := assets.Validate(params.DestAsset); err != nil {
+		return fmt.Errorf("destination_asset: %w", err)
+	}
+	if params.SlippageAccount != "" {
+		if err := accounts.Validate(params.SlippageAccount); err != nil {
+			return fmt.Errorf("slippage_account: %w", err)
+		}
+	}
+	if params.SourceAmount == nil || params.SourceAmount.Sign() <= 0 {
+		return fmt.Errorf("source_amount must be positive")
+	}
+	if params.DestAmount == nil || params.DestAmount.Sign() <= 0 {
+		return fmt.Errorf("destination_amount must be positive")
+	}
+	if params.SourceAsset == params.DestAsset {
+		return fmt.Errorf("source_asset and destination_asset must differ for conversion")
+	}
+	if params.Rate != "" {
+		if _, _, err := big.ParseFloat(params.Rate, 10, 128, big.ToNearestEven); err != nil {
+			return fmt.Errorf("invalid conversion rate %q: %w", params.Rate, err)
+		}
+	}
+	return nil
+}
+
+// doConvertInTx is the shared core of an FX conversion: validate, balance-check
+// the source (incl. slippage), and write the event + zero-sum 4-leg volume
+// deltas (+ optional slippage leg) + accounts + transaction projection. Records
+// idempotency only when ikHash is non-nil (standalone path).
+func (p *Planner) doConvertInTx(ctx context.Context, txStore storage.TxStore, ledger *storage.LedgerRecord, params ConvertParams, idempotencyKey string, ikHash []byte, vt, now time.Time) (*SubmitResult, error) {
+	if err := validateConvertParams(params); err != nil {
+		return nil, err
+	}
+
+	eventID := ulid.Make().String()
+	conversionID := ulid.Make().String()
+	txID := ulid.Make().String()
+
+	batchID, err := p.batch.CurrentBatchID(ctx, ledger.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+	seq, err := txStore.NextLedgerSeq(ctx, ledger.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Balance check inside the tx (TOCTOU-safe); total source output includes slippage.
+	if !accounts.IsIssuer(params.Source, ledger.IssuerAccounts) {
+		bal, err := txStore.GetBalance(ctx, ledger.ID, params.Source, params.SourceAsset, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		current := new(big.Int).Sub(bal.Input, bal.Output)
+		activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledger.ID, params.Source, params.SourceAsset)
+		if err != nil {
+			return nil, fmt.Errorf("getting active holds for %s/%s: %w", params.Source, params.SourceAsset, err)
+		}
+		current.Sub(current, activeHolds)
+		totalSourceOutput := new(big.Int).Set(params.SourceAmount)
+		if params.SlippageAmount != nil && params.SlippageAmount.Sign() > 0 {
+			totalSourceOutput.Add(totalSourceOutput, params.SlippageAmount)
+		}
+		if current.Cmp(totalSourceOutput) < 0 {
+			return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, params.Source, params.SourceAsset)
+		}
+	}
+
+	payload, err := json.Marshal(map[string]string{
+		"conversion_id":      conversionID,
+		"source":             params.Source,
+		"destination":        params.Destination,
+		"source_amount":      params.SourceAmount.String(),
+		"source_asset":       params.SourceAsset,
+		"destination_amount": params.DestAmount.String(),
+		"destination_asset":  params.DestAsset,
+		"rate":               params.Rate,
+		"rate_source":        params.RateSource,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling payload: %w", err)
+	}
+
+	logEvent := storage.LogEventRecord{
+		EventID: eventID, LedgerID: ledger.ID, LedgerSeq: seq,
+		SystemTime: now, ValidTime: vt, Type: storage.EventTypeConversionCreated,
+		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
+	}
+	if idempotencyKey != "" && ikHash != nil {
+		logEvent.IdempotencyHash = ikHash
+	}
+	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+		return nil, err
+	}
+
+	// Zero-sum 4-leg deltas: leg1 source_asset source->dest, leg2 dest_asset dest->source.
+	legs := []storage.VolumeDeltaRecord{
+		{LedgerID: ledger.ID, Account: params.Source, Asset: params.SourceAsset, EventID: eventID, ValidTime: vt, SystemTime: now, InputDelta: big.NewInt(0), OutputDelta: params.SourceAmount},
+		{LedgerID: ledger.ID, Account: params.Destination, Asset: params.SourceAsset, EventID: eventID, ValidTime: vt, SystemTime: now, InputDelta: params.SourceAmount, OutputDelta: big.NewInt(0)},
+		{LedgerID: ledger.ID, Account: params.Destination, Asset: params.DestAsset, EventID: eventID, ValidTime: vt, SystemTime: now, InputDelta: big.NewInt(0), OutputDelta: params.DestAmount},
+		{LedgerID: ledger.ID, Account: params.Source, Asset: params.DestAsset, EventID: eventID, ValidTime: vt, SystemTime: now, InputDelta: params.DestAmount, OutputDelta: big.NewInt(0)},
+	}
+	hasSlippage := params.SlippageAmount != nil && params.SlippageAmount.Sign() > 0 && params.SlippageAccount != ""
+	if hasSlippage {
+		legs = append(legs,
+			storage.VolumeDeltaRecord{LedgerID: ledger.ID, Account: params.Source, Asset: params.SourceAsset, EventID: eventID, ValidTime: vt, SystemTime: now, InputDelta: big.NewInt(0), OutputDelta: params.SlippageAmount},
+			storage.VolumeDeltaRecord{LedgerID: ledger.ID, Account: params.SlippageAccount, Asset: params.SourceAsset, EventID: eventID, ValidTime: vt, SystemTime: now, InputDelta: params.SlippageAmount, OutputDelta: big.NewInt(0)},
+		)
+	}
+	for _, leg := range legs {
+		if err := txStore.InsertVolumeDelta(ctx, leg); err != nil {
+			return nil, err
+		}
+	}
+
+	accountsToUpsert := []string{params.Source, params.Destination}
+	if hasSlippage {
+		accountsToUpsert = append(accountsToUpsert, params.SlippageAccount)
+	}
+	for _, addr := range accountsToUpsert {
+		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+			LedgerID: ledger.ID, Address: addr, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
+		}); err != nil {
+			return nil, fmt.Errorf("upserting account: %w", err)
+		}
+	}
+
+	postingRecords := []map[string]any{
+		{"source": params.Source, "destination": params.Destination, "amount": params.SourceAmount.String(), "asset": params.SourceAsset},
+		{"source": params.Destination, "destination": params.Source, "amount": params.DestAmount.String(), "asset": params.DestAsset},
+	}
+	if hasSlippage {
+		postingRecords = append(postingRecords, map[string]any{
+			"source": params.Source, "destination": params.SlippageAccount,
+			"amount": params.SlippageAmount.String(), "asset": params.SourceAsset,
+		})
+	}
+	if err := txStore.InsertTransaction(ctx, storage.TransactionRecord{
+		LedgerID: ledger.ID, TransactionID: txID, EventID: eventID,
+		ValidTime: vt, SystemTime: now, Postings: postingRecords,
+		Metadata: map[string]any{"type": "conversion", "rate": params.Rate, "rate_source": params.RateSource},
+	}); err != nil {
+		return nil, fmt.Errorf("inserting conversion transaction: %w", err)
+	}
+
+	if idempotencyKey != "" && ikHash != nil {
+		if err := p.recordIdempotency(ctx, txStore, ledger.ID, idempotencyKey, eventID, ikHash); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID, ConversionID: conversionID}, nil
+}
