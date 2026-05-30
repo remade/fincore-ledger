@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -20,18 +21,28 @@ const (
 	DefaultMaxEvents = 1000
 	// DefaultMaxAge is the max time a batch stays open.
 	DefaultMaxAge = 5 * time.Second
+
+	// maxCloseRetries is the number of additional close attempts after the first
+	// before a batch is logged as a critical orphan (left for the next sweep).
+	maxCloseRetries = 3
+	// initialCloseBackoff / maxCloseBackoff bound the exponential retry backoff.
+	initialCloseBackoff = 50 * time.Millisecond
+	maxCloseBackoff     = 5 * time.Second
 )
 
 // Manager manages Merkle batch lifecycle per ledger.
 type Manager struct {
-	store      storage.Store
-	logger     *zap.Logger
-	maxEvents  int
-	maxAge     time.Duration
+	store     storage.Store
+	logger    *zap.Logger
+	maxEvents int
+	maxAge    time.Duration
 
-	mu         sync.Mutex                        // protects ledgerLocks and openBatch maps
-	ledgerLocks map[string]*sync.Mutex            // per-ledger lock for CreateBatch I/O
-	openBatch  map[string]*openBatchState         // ledgerID -> state
+	mu          sync.Mutex                 // protects ledgerLocks, openBatch, pendingClose
+	ledgerLocks map[string]*sync.Mutex     // per-ledger lock for CreateBatch I/O
+	openBatch   map[string]*openBatchState // ledgerID -> state
+	// pendingClose tracks batch IDs whose close is in flight, so the async close
+	// and the orphan sweep never attempt the same batch concurrently.
+	pendingClose map[string]bool
 
 	// shutdownCtx is cancelled when the application stops, ensuring async
 	// batch close goroutines do not outlive the connection pool.
@@ -55,6 +66,7 @@ func NewManager(lc fx.Lifecycle, store storage.Store, logger *zap.Logger) *Manag
 		maxAge:         DefaultMaxAge,
 		ledgerLocks:    make(map[string]*sync.Mutex),
 		openBatch:      make(map[string]*openBatchState),
+		pendingClose:   make(map[string]bool),
 		shutdownCtx:    ctx,
 		shutdownCancel: cancel,
 	}
@@ -109,16 +121,80 @@ func (m *Manager) CurrentBatchID(ctx context.Context, ledgerID string) (string, 
 	}
 	m.mu.Unlock()
 
-	// Close old batch async if there was one.
+	// Close old batch async if there was one. The batch stays open in storage
+	// until the close commits. Invariant: every batch evicted from openBatch is
+	// guaranteed to re-surface via ListOpenBatches once opened_at + maxAge
+	// elapses -- the sole backstop if this async close exhausts its retries
+	// (notably for max-events rollovers, which may not yet be age-eligible).
 	if oldBatchID != "" {
 		closeCtx, closeCancel := context.WithTimeout(m.shutdownCtx, 30*time.Second)
 		go func() {
 			defer closeCancel()
-			m.closeBatch(closeCtx, ledgerID, oldBatchID)
+			m.closeBatchWithRetry(closeCtx, ledgerID, oldBatchID)
 		}()
 	}
 
 	return batchID, nil
+}
+
+// markPendingClose claims a batch for closing; it returns false if another
+// goroutine is already closing it (so the caller should skip).
+func (m *Manager) markPendingClose(batchID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pendingClose[batchID] {
+		return false
+	}
+	m.pendingClose[batchID] = true
+	return true
+}
+
+func (m *Manager) unmarkPendingClose(batchID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.pendingClose, batchID)
+}
+
+// closeBatchWithRetry closes a batch with bounded exponential backoff. The batch
+// stays open in storage until the close commits, and is held in pendingClose for
+// the duration so a concurrent sweep won't race it. If all attempts fail, it
+// emits a critical, alertable log and leaves the batch open for a later sweep to
+// retry (preserving Merkle-chain integrity over silent data loss).
+func (m *Manager) closeBatchWithRetry(ctx context.Context, ledgerID, batchID string) {
+	if !m.markPendingClose(batchID) {
+		return
+	}
+	defer m.unmarkPendingClose(batchID)
+
+	backoff := initialCloseBackoff
+	for attempt := 0; ; attempt++ {
+		err := m.closeBatch(ctx, ledgerID, batchID)
+		if err == nil {
+			return
+		}
+		if attempt >= maxCloseRetries {
+			m.logger.Error("CRITICAL: batch close failed after retries; batch left open for the next sweep -- Merkle chain integrity at risk",
+				zap.String("severity", "critical"),
+				zap.String("batch", batchID),
+				zap.String("ledger", ledgerID),
+				zap.Int("attempts", attempt+1),
+				zap.Error(err),
+			)
+			return
+		}
+		// Backoff with +/-50% jitter, abortable on shutdown/timeout. No time.Sleep.
+		jitter := time.Duration(rand.Int64N(int64(backoff)))
+		select {
+		case <-ctx.Done():
+			m.logger.Warn("batch close retry aborted",
+				zap.String("batch", batchID), zap.Int("attempts", attempt+1), zap.Error(ctx.Err()))
+			return
+		case <-time.After(backoff + jitter):
+		}
+		if backoff *= 2; backoff > maxCloseBackoff {
+			backoff = maxCloseBackoff
+		}
+	}
 }
 
 // getLedgerLock returns the per-ledger mutex, creating one if needed.
@@ -133,17 +209,17 @@ func (m *Manager) getLedgerLock(ledgerID string) *sync.Mutex {
 	return lmu
 }
 
-// closeBatch closes a batch by computing its Merkle root.
-func (m *Manager) closeBatch(ctx context.Context, ledgerID, batchID string) {
+// closeBatch closes a batch by computing its Merkle root. It returns an error
+// on failure so the caller can retry; an empty batch is a no-op (not an error).
+func (m *Manager) closeBatch(ctx context.Context, ledgerID, batchID string) error {
 	events, err := m.store.ListBatchEvents(ctx, batchID)
 	if err != nil {
-		m.logger.Error("failed to list batch events", zap.Error(err), zap.String("batch", batchID))
-		return
+		return fmt.Errorf("listing batch events: %w", err)
 	}
 
 	if len(events) == 0 {
 		m.logger.Debug("empty batch, skipping close", zap.String("batch", batchID))
-		return
+		return nil
 	}
 
 	leaves := make([][]byte, len(events))
@@ -156,8 +232,7 @@ func (m *Manager) closeBatch(ctx context.Context, ledgerID, batchID string) {
 	root := merkle.ComputeRoot(leaves)
 
 	if err := m.store.CloseBatch(ctx, batchID, root, len(events)); err != nil {
-		m.logger.Error("failed to close batch", zap.Error(err), zap.String("batch", batchID))
-		return
+		return fmt.Errorf("closing batch: %w", err)
 	}
 
 	m.logger.Info("batch closed",
@@ -165,6 +240,7 @@ func (m *Manager) closeBatch(ctx context.Context, ledgerID, batchID string) {
 		zap.String("ledger", ledgerID),
 		zap.Int("events", len(events)),
 	)
+	return nil
 }
 
 // CloseExpiredBatches scans for open batches past their max age and closes them.
@@ -182,17 +258,19 @@ func (m *Manager) CloseExpiredBatches(ctx context.Context) {
 	m.mu.Unlock()
 
 	for _, item := range toClose {
-		m.closeBatch(ctx, item.ledgerID, item.batchID)
+		m.closeBatchWithRetry(ctx, item.ledgerID, item.batchID)
 	}
 
-	// Also scan PG for orphaned open batches (e.g., from a previous process crash).
+	// Also scan PG for orphaned open batches (e.g., from a previous process crash
+	// or a close that exhausted its retries). closeBatchWithRetry skips any batch
+	// already being closed elsewhere.
 	orphaned, err := m.store.ListOpenBatches(ctx, m.maxAge)
 	if err != nil {
 		m.logger.Error("failed to list orphaned open batches", zap.Error(err))
 		return
 	}
 	for _, b := range orphaned {
-		m.closeBatch(ctx, b.LedgerID, b.BatchID)
+		m.closeBatchWithRetry(ctx, b.LedgerID, b.BatchID)
 	}
 }
 

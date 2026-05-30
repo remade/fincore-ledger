@@ -3,11 +3,23 @@ package subscriptions
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
 	"github.com/remade/ledger/internal/storage"
 	redisclient "github.com/remade/ledger/internal/storage/redis"
+)
+
+const (
+	// subscriptionBufferSize is the per-subscription channel buffer.
+	subscriptionBufferSize = 100
+	// maxReplayEvents bounds historical replay so the dedup set cannot grow
+	// without limit; larger windows must use the Export RPC.
+	maxReplayEvents = 100_000
+	// dropLogInterval throttles the slow-consumer drop warnings.
+	dropLogInterval = 100
 )
 
 // EventNotification is published to Redis when a new event is committed.
@@ -43,7 +55,7 @@ func (m *Manager) Publish(ctx context.Context, notification EventNotification) e
 // Subscribe creates a subscription to events for a ledger.
 // It returns a channel of events and a cancel function.
 func (m *Manager) Subscribe(ctx context.Context, ledgerID string, eventTypes []int16, fromEventID string, store storage.Store) (<-chan storage.LogEventRecord, func(), error) {
-	ch := make(chan storage.LogEventRecord, 100)
+	ch := make(chan storage.LogEventRecord, subscriptionBufferSize)
 
 	// Subscribe to Redis pub/sub FIRST so we don't miss events during replay.
 	rdb := m.redis.Underlying()
@@ -63,14 +75,23 @@ func (m *Manager) Subscribe(ctx context.Context, ledgerID string, eventTypes []i
 	if fromEventID != "" {
 		replayedIDs = make(map[string]struct{})
 		pageToken := fromEventID
+		replayed := 0
 		for {
 			events, nextToken, err := store.ListLogEvents(ctx, ledgerID, storage.ListParams{PageSize: 100, PageToken: pageToken})
 			if err != nil {
-				pubsub.Close()
+				_ = pubsub.Close()
 				close(ch)
 				return nil, nil, err
 			}
 			for _, e := range events {
+				replayed++
+				if replayed > maxReplayEvents {
+					// Bound the dedup set and replay duration: very large windows
+					// must be read via the Export RPC, not a live Subscribe.
+					_ = pubsub.Close()
+					close(ch)
+					return nil, nil, fmt.Errorf("replay window exceeds %d events from %q; use the Export RPC for full history instead of Subscribe", maxReplayEvents, fromEventID)
+				}
 				replayedIDs[e.EventID] = struct{}{}
 				if e.EventID > highWaterMark {
 					highWaterMark = e.EventID
@@ -79,7 +100,7 @@ func (m *Manager) Subscribe(ctx context.Context, ledgerID string, eventTypes []i
 					select {
 					case ch <- e:
 					case <-ctx.Done():
-						pubsub.Close()
+						_ = pubsub.Close()
 						close(ch)
 						return nil, nil, ctx.Err()
 					}
@@ -96,8 +117,10 @@ func (m *Manager) Subscribe(ctx context.Context, ledgerID string, eventTypes []i
 
 	go func() {
 		defer close(ch)
-		defer pubsub.Close()
+		defer func() { _ = pubsub.Close() }()
 
+		// Per-subscription drop counter for slow-consumer backpressure.
+		var dropped uint64
 		msgCh := pubsub.Channel()
 		for {
 			select {
@@ -125,7 +148,7 @@ func (m *Manager) Subscribe(ctx context.Context, ledgerID string, eventTypes []i
 						replayedIDs = nil
 					}
 				}
-				m.handleNotification(cancelCtx, notification, eventTypes, store, ch)
+				m.handleNotification(cancelCtx, notification, eventTypes, store, ch, &dropped)
 			}
 		}
 	}()
@@ -133,7 +156,7 @@ func (m *Manager) Subscribe(ctx context.Context, ledgerID string, eventTypes []i
 	return ch, cancel, nil
 }
 
-func (m *Manager) handleNotification(ctx context.Context, notification EventNotification, eventTypes []int16, store storage.Store, ch chan<- storage.LogEventRecord) {
+func (m *Manager) handleNotification(ctx context.Context, notification EventNotification, eventTypes []int16, store storage.Store, ch chan<- storage.LogEventRecord, dropped *uint64) {
 	if !shouldInclude(notification.Type, eventTypes) {
 		return
 	}
@@ -149,10 +172,21 @@ func (m *Manager) handleNotification(ctx context.Context, notification EventNoti
 		return
 	}
 
+	// Non-blocking send: a slow consumer drops the live event (and is warned)
+	// rather than blocking the Redis pub/sub processing loop. Dropped events can
+	// be recovered by re-subscribing with fromEventID or via the Export RPC.
 	select {
 	case ch <- *event:
 	case <-ctx.Done():
-		return
+	default:
+		n := atomic.AddUint64(dropped, 1)
+		if n == 1 || n%dropLogInterval == 0 {
+			m.logger.Warn("subscription channel full; dropping live event (slow consumer)",
+				zap.String("ledger", notification.LedgerID),
+				zap.String("event_id", notification.EventID),
+				zap.Uint64("dropped_total", n),
+			)
+		}
 	}
 }
 
