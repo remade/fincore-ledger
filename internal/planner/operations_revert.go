@@ -31,9 +31,9 @@ func (p *Planner) SubmitRevert(ctx context.Context, ledgerID, originalTxID strin
 		}
 	}
 
+	now := time.Now().UTC()
 	var result *SubmitResult
 	err := withDeadlockRetry(ctx, 5, func() error {
-		now := time.Now().UTC()
 		eventID := ulid.Make().String()
 		txID := ulid.Make().String()
 
@@ -185,7 +185,7 @@ func (p *Planner) SubmitRevert(ctx context.Context, ledgerID, originalTxID strin
 			LedgerSeq:       seq,
 			SystemTime:      now,
 			ValidTime:       vt,
-			Type:            7, // TRANSACTION_REVERTED
+			Type:            storage.EventTypeTransactionReverted,
 			Payload:         payload,
 			IdempotencyKey:  idempotencyKey,
 			IdempotencyHash: ikHash,
@@ -243,7 +243,7 @@ func (p *Planner) SubmitRevert(ctx context.Context, ledgerID, originalTxID strin
 
 		if err := txStore.InsertRelationship(ctx, storage.RelationshipRecord{
 			LedgerID: ledgerID, ParentTxID: originalTxID, ChildTxID: txID,
-			RelationshipType: 0, EventID: eventID, SystemTime: now,
+			RelationshipType: storage.RelationshipTypeReverts, EventID: eventID, SystemTime: now,
 		}); err != nil {
 			return fmt.Errorf("inserting revert relationship: %w", err)
 		}
@@ -300,9 +300,9 @@ func (p *Planner) SubmitAmend(ctx context.Context, ledgerID, originalTxID string
 		}
 	}
 
+	now := time.Now().UTC()
 	var result *SubmitResult
 	err := withDeadlockRetry(ctx, 5, func() error {
-		now := time.Now().UTC()
 		eventID := ulid.Make().String()
 
 		batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
@@ -336,7 +336,7 @@ func (p *Planner) SubmitAmend(ctx context.Context, ledgerID, originalTxID string
 
 		if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 			EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-			SystemTime: now, ValidTime: now, Type: 8, // TRANSACTION_AMENDED
+			SystemTime: now, ValidTime: now, Type: storage.EventTypeTransactionAmended,
 			Payload: payload, IdempotencyKey: idempotencyKey,
 			IdempotencyHash: ikHash,
 			BatchID:         batchID, SchemaVersion: 1,
@@ -349,7 +349,7 @@ func (p *Planner) SubmitAmend(ctx context.Context, ledgerID, originalTxID string
 		}
 
 		if err := txStore.InsertMetadataHistory(ctx, storage.MetadataHistoryRecord{
-			LedgerID: ledgerID, TargetType: 1,
+			LedgerID: ledgerID, TargetType: storage.TargetTypeTransaction,
 			TargetID: originalTxID, Revision: seq,
 			Metadata: metadataChanges, EventID: eventID, SystemTime: now,
 		}); err != nil {
@@ -360,7 +360,7 @@ func (p *Planner) SubmitAmend(ctx context.Context, ledgerID, originalTxID string
 		// create new transactions. Relationship queries should handle this.
 		if err := txStore.InsertRelationship(ctx, storage.RelationshipRecord{
 			LedgerID: ledgerID, ParentTxID: originalTxID,
-			ChildTxID: eventID, RelationshipType: 1, // amends
+			ChildTxID: eventID, RelationshipType: storage.RelationshipTypeAmends,
 			EventID: eventID, SystemTime: now,
 		}); err != nil {
 			return err

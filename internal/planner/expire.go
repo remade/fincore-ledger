@@ -89,7 +89,7 @@ func (p *Planner) expireSingleHold(ctx context.Context, hold storage.HoldRecord)
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: hold.LedgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: 5, // HOLD_EXPIRED
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldExpired,
 		Payload: payload, BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
 		return err

@@ -2,7 +2,6 @@ package grpc
 
 import (
 	"errors"
-	"fmt"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,23 +43,13 @@ func txRecordToProto(rec *storage.TransactionRecord) *pb.Transaction {
 	if rawPostings, ok := rec.Postings.([]any); ok {
 		for _, rp := range rawPostings {
 			if p, ok := rp.(map[string]any); ok {
-				tx.Postings = append(tx.Postings, &pb.Posting{
-					Source:      fmt.Sprint(p["source"]),
-					Destination: fmt.Sprint(p["destination"]),
-					Amount:      fmt.Sprint(p["amount"]),
-					Asset:       fmt.Sprint(p["asset"]),
-				})
+				tx.Postings = append(tx.Postings, postingMapToProto(p))
 			}
 		}
 	} else if postings, ok := rec.Postings.([]map[string]any); ok {
 		// Direct from planner (no JSON round-trip).
 		for _, p := range postings {
-			tx.Postings = append(tx.Postings, &pb.Posting{
-				Source:      fmt.Sprint(p["source"]),
-				Destination: fmt.Sprint(p["destination"]),
-				Amount:      fmt.Sprint(p["amount"]),
-				Asset:       fmt.Sprint(p["asset"]),
-			})
+			tx.Postings = append(tx.Postings, postingMapToProto(p))
 		}
 	}
 
@@ -117,6 +106,27 @@ func isNotFound(err error) bool {
 
 func isAlreadyExists(err error) bool {
 	return errors.Is(err, storage.ErrAlreadyExists)
+}
+
+func postingMapToProto(p map[string]any) *pb.Posting {
+	return &pb.Posting{
+		Source:      mapStr(p, "source"),
+		Destination: mapStr(p, "destination"),
+		Amount:      mapStr(p, "amount"),
+		Asset:       mapStr(p, "asset"),
+	}
+}
+
+func mapStr(m map[string]any, key string) string {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return s
 }
 
 func mapPlannerError(err error) error {

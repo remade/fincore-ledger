@@ -1,0 +1,9 @@
+.git
+bin/
+tmp/
+.env
+deploy/
+test/
+docs/
+.air.toml
+*.md

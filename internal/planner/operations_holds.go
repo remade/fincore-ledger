@@ -36,9 +36,9 @@ func (p *Planner) SubmitAuthorize(ctx context.Context, ledgerID, source, destHin
 		}
 	}
 
+	now := time.Now().UTC()
 	var result *SubmitResult
 	err = withDeadlockRetry(ctx, 5, func() error {
-		now := time.Now().UTC()
 		eventID := ulid.Make().String()
 		holdID := ulid.Make().String()
 
@@ -89,7 +89,7 @@ func (p *Planner) SubmitAuthorize(ctx context.Context, ledgerID, source, destHin
 
 		if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 			EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-			SystemTime: now, ValidTime: now, Type: 2,
+			SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldCreated,
 			Payload: payload, IdempotencyKey: idempotencyKey,
 			IdempotencyHash: ikHash,
 			BatchID:         batchID, SchemaVersion: 1,
@@ -155,9 +155,9 @@ func (p *Planner) SubmitCapture(ctx context.Context, ledgerID, holdID string, am
 		}
 	}
 
+	now := time.Now().UTC()
 	var result *SubmitResult
 	err := withDeadlockRetry(ctx, 5, func() error {
-		now := time.Now().UTC()
 		eventID := ulid.Make().String()
 
 		batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
@@ -212,7 +212,7 @@ func (p *Planner) SubmitCapture(ctx context.Context, ledgerID, holdID string, am
 
 		if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 			EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-			SystemTime: now, ValidTime: now, Type: 3,
+			SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldConfirmed,
 			Payload: payload, IdempotencyKey: idempotencyKey,
 			IdempotencyHash: ikHash,
 			BatchID:         batchID, SchemaVersion: 1,
@@ -286,9 +286,9 @@ func (p *Planner) SubmitVoid(ctx context.Context, ledgerID, holdID string, idemp
 		}
 	}
 
+	now := time.Now().UTC()
 	var result *SubmitResult
 	err := withDeadlockRetry(ctx, 5, func() error {
-		now := time.Now().UTC()
 		eventID := ulid.Make().String()
 
 		batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
@@ -328,7 +328,7 @@ func (p *Planner) SubmitVoid(ctx context.Context, ledgerID, holdID string, idemp
 
 		if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 			EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-			SystemTime: now, ValidTime: now, Type: 4, // HOLD_VOIDED
+			SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldVoided,
 			Payload: payload, IdempotencyKey: idempotencyKey,
 			IdempotencyHash: ikHash,
 			BatchID:         batchID, SchemaVersion: 1,

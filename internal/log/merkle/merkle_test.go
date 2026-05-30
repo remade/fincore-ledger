@@ -62,13 +62,18 @@ func TestComputeRootOddLeaves(t *testing.T) {
 }
 
 func TestVerifyEmpty(t *testing.T) {
-	// Empty leaves with nil expected root should match (both nil).
-	if !Verify(nil, nil) {
-		t.Error("empty leaves with nil expected root should verify as true")
+	// Empty leaves with nil expected root — both nil roots are invalid.
+	if Verify(nil, nil) {
+		t.Error("empty leaves with nil expected root should verify as false")
 	}
 	// Empty leaves with non-nil expected root should not match.
 	if Verify(nil, []byte{0x01}) {
 		t.Error("empty leaves with non-nil expected root should verify as false")
+	}
+	// Non-empty leaves with nil expected root should not match.
+	leaf := testHash([]byte("event1"))
+	if Verify([][]byte{leaf}, nil) {
+		t.Error("non-empty leaves with nil expected root should verify as false")
 	}
 }
 

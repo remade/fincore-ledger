@@ -4,6 +4,8 @@ tmp/
 *.exe
 *.test
 *.out
+/server
+/ledgerctl
 .env
 .DS_Store
 .plans

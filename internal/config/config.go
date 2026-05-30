@@ -79,7 +79,7 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 	v := viper.New()
 
 	// --- Defaults ---
-	v.SetDefault("postgres.dsn", "postgres://ledger:ledger@localhost:5432/ledger?sslmode=disable")
+	v.SetDefault("postgres.dsn", "postgres://ledger:ledger@localhost:5432/ledger?sslmode=require")
 	v.SetDefault("redis.url", "redis://localhost:6379/0")
 	v.SetDefault("grpc.port", 9090)
 	v.SetDefault("http.port", 8080)
@@ -195,6 +195,9 @@ func (c *Config) validate() error {
 	}
 	if c.Worker.ApprovalExpiryInterval <= 0 {
 		return fmt.Errorf("config: worker.approval_expiry_interval must be positive, got %v", c.Worker.ApprovalExpiryInterval)
+	}
+	if c.Environment != "development" && strings.Contains(c.Postgres.DSN, "sslmode=disable") {
+		return fmt.Errorf("config: postgres.dsn uses sslmode=disable in %s environment; use sslmode=require or sslmode=verify-full", c.Environment)
 	}
 	return nil
 }

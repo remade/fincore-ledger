@@ -3,7 +3,6 @@ package subscriptions
 import (
 	"context"
 	"encoding/json"
-	"sync"
 
 	"go.uber.org/zap"
 
@@ -22,7 +21,6 @@ type EventNotification struct {
 type Manager struct {
 	redis  *redisclient.Client
 	logger *zap.Logger
-	mu     sync.Mutex
 }
 
 // NewManager creates a new subscription Manager.

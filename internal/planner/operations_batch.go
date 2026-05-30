@@ -256,7 +256,7 @@ func (p *Planner) executePostInTx(ctx context.Context, txStore storage.TxStore, 
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: 1,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeTransactionPosted,
 		Payload: payload, IdempotencyKey: intent.IdempotencyKey,
 		BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
@@ -329,7 +329,7 @@ func (p *Planner) executeSetMetadataInTx(ctx context.Context, txStore storage.Tx
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: 9,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeMetadataSet,
 		Payload: payload, BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
 		return nil, err
@@ -373,7 +373,7 @@ func (p *Planner) executeDeleteMetadataInTx(ctx context.Context, txStore storage
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: 10,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeMetadataDeleted,
 		Payload: payload, BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
 		return nil, err
@@ -435,7 +435,7 @@ func (p *Planner) executeAuthorizeInTx(ctx context.Context, txStore storage.TxSt
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: 2,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldCreated,
 		Payload: payload, BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
 		return nil, err
@@ -508,7 +508,7 @@ func (p *Planner) executeCaptureInTx(ctx context.Context, txStore storage.TxStor
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: 3,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldConfirmed,
 		Payload: payload, BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
 		return nil, err
@@ -574,7 +574,7 @@ func (p *Planner) executeVoidInTx(ctx context.Context, txStore storage.TxStore, 
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: 4,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldVoided,
 		Payload: payload, BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
 		return nil, err
@@ -704,7 +704,7 @@ func (p *Planner) executeRevertInTx(ctx context.Context, txStore storage.TxStore
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: vt, Type: 7,
+		SystemTime: now, ValidTime: vt, Type: storage.EventTypeTransactionReverted,
 		Payload: payload, BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
 		return nil, err
@@ -750,7 +750,7 @@ func (p *Planner) executeRevertInTx(ctx context.Context, txStore storage.TxStore
 
 	if err := txStore.InsertRelationship(ctx, storage.RelationshipRecord{
 		LedgerID: ledgerID, ParentTxID: intent.OriginalTxID, ChildTxID: txID,
-		RelationshipType: 0, EventID: eventID, SystemTime: now,
+		RelationshipType: storage.RelationshipTypeReverts, EventID: eventID, SystemTime: now,
 	}); err != nil {
 		return nil, err
 	}
@@ -789,7 +789,7 @@ func (p *Planner) executeAmendInTx(ctx context.Context, txStore storage.TxStore,
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: 8,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypeTransactionAmended,
 		Payload: payload, BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
 		return nil, err
@@ -800,7 +800,7 @@ func (p *Planner) executeAmendInTx(ctx context.Context, txStore storage.TxStore,
 	}
 
 	if err := txStore.InsertMetadataHistory(ctx, storage.MetadataHistoryRecord{
-		LedgerID: ledgerID, TargetType: 1,
+		LedgerID: ledgerID, TargetType: storage.TargetTypeTransaction,
 		TargetID: intent.OriginalTxID, Revision: seq,
 		Metadata: intent.Metadata, EventID: eventID, SystemTime: now,
 	}); err != nil {
@@ -809,7 +809,7 @@ func (p *Planner) executeAmendInTx(ctx context.Context, txStore storage.TxStore,
 
 	if err := txStore.InsertRelationship(ctx, storage.RelationshipRecord{
 		LedgerID: ledgerID, ParentTxID: intent.OriginalTxID,
-		ChildTxID: eventID, RelationshipType: 1,
+		ChildTxID: eventID, RelationshipType: storage.RelationshipTypeAmends,
 		EventID: eventID, SystemTime: now,
 	}); err != nil {
 		return nil, err
@@ -883,7 +883,7 @@ func (p *Planner) executeConvertInTx(ctx context.Context, txStore storage.TxStor
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: vt, Type: 6,
+		SystemTime: now, ValidTime: vt, Type: storage.EventTypeConversionCreated,
 		Payload: payload, BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {
 		return nil, err

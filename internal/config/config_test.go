@@ -25,7 +25,7 @@ func TestNew_Defaults(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.Postgres.DSN != "postgres://ledger:ledger@localhost:5432/ledger?sslmode=disable" {
+	if cfg.Postgres.DSN != "postgres://ledger:ledger@localhost:5432/ledger?sslmode=require" {
 		t.Errorf("postgres DSN = %q, want default", cfg.Postgres.DSN)
 	}
 	if cfg.Redis.URL != "redis://localhost:6379/0" {

@@ -27,9 +27,9 @@ func (p *Planner) SubmitInsertSchema(ctx context.Context, ledgerID string, schem
 		}
 	}
 
+	now := time.Now().UTC()
 	var result *SubmitResult
 	err := withDeadlockRetry(ctx, 5, func() error {
-		now := time.Now().UTC()
 		eventID := ulid.Make().String()
 
 		batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
@@ -54,7 +54,7 @@ func (p *Planner) SubmitInsertSchema(ctx context.Context, ledgerID string, schem
 			LedgerSeq:      seq,
 			SystemTime:     now,
 			ValidTime:      now,
-			Type:           11, // SCHEMA_INSERTED
+			Type:           storage.EventTypeSchemaInserted,
 			Payload:        schemaBytes,
 			IdempotencyKey: idempotencyKey,
 			BatchID:        batchID,

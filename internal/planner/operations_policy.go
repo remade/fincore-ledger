@@ -79,7 +79,7 @@ func (p *Planner) writePolicyDenialEvent(ctx context.Context, ledgerID, principa
 
 	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: 12,
+		SystemTime: now, ValidTime: now, Type: storage.EventTypePolicyUpdated,
 		Payload: payload,
 		BatchID: batchID, SchemaVersion: 1,
 	}); err != nil {

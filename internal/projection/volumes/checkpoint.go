@@ -54,7 +54,7 @@ func (cb *CheckpointBuilder) BuildCheckpoints(ctx context.Context) error {
 	}
 	defer rows.Close()
 
-	var built int
+	var built, failed int
 	for rows.Next() {
 		var ledgerID, account, asset, lastEventID string
 		var shard int16
@@ -90,8 +90,9 @@ func (cb *CheckpointBuilder) BuildCheckpoints(ctx context.Context) error {
 			totalInput.String(), totalOutput.String(), lastEventID,
 		)
 		if err != nil {
+			failed++
 			cb.logger.Error("failed to write checkpoint",
-				zap.String("ledger", ledgerID),
+				zap.String("ledger_id", ledgerID),
 				zap.String("account", account),
 				zap.String("asset", asset),
 				zap.Error(err),
@@ -106,6 +107,9 @@ func (cb *CheckpointBuilder) BuildCheckpoints(ctx context.Context) error {
 
 	if built > 0 {
 		cb.logger.Info("checkpoints built", zap.Int("count", built))
+	}
+	if failed > 0 {
+		return fmt.Errorf("failed to write %d of %d checkpoints", failed, built+failed)
 	}
 	return nil
 }

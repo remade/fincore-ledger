@@ -65,8 +65,12 @@ func ComputeRoot(leaves [][]byte) []byte {
 }
 
 // Verify recomputes the Merkle root from leaves and compares against the expected root.
+// Returns false if either root is nil (empty batches are never considered valid).
 func Verify(leaves [][]byte, expectedRoot []byte) bool {
 	computed := ComputeRoot(leaves)
+	if computed == nil || expectedRoot == nil {
+		return false
+	}
 	return subtle.ConstantTimeCompare(computed, expectedRoot) == 1
 }
 

@@ -150,7 +150,7 @@ func (p *Planner) SubmitConvert(ctx context.Context, ledgerID string, params Con
 
 		if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
 			EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-			SystemTime: now, ValidTime: vt, Type: 6,
+			SystemTime: now, ValidTime: vt, Type: storage.EventTypeConversionCreated,
 			Payload: payload, IdempotencyKey: idempotencyKey,
 			IdempotencyHash: ikHash,
 			BatchID: batchID, SchemaVersion: 1,

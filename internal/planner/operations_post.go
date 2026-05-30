@@ -189,7 +189,7 @@ func (p *Planner) SubmitPost(ctx context.Context, ledgerID string, postings []Po
 			LedgerSeq:      seq,
 			SystemTime:     now,
 			ValidTime:      vt,
-			Type:           1, // TRANSACTION_POSTED
+			Type:           storage.EventTypeTransactionPosted,
 			Payload:        payload,
 			IdempotencyKey: idempotencyKey,
 			BatchID:        batchID,
@@ -232,7 +232,7 @@ func (p *Planner) SubmitPost(ctx context.Context, ledgerID string, postings []Po
 		if len(metadata) > 0 {
 			if err := txStore.InsertMetadataHistory(ctx, storage.MetadataHistoryRecord{
 				LedgerID:   ledgerID,
-				TargetType: 1, // TRANSACTION
+				TargetType: storage.TargetTypeTransaction,
 				TargetID:   txID,
 				Revision:   0,
 				Metadata:   metadata,
@@ -340,6 +340,12 @@ func (p *Planner) validatePostingsAgainstSchema(ctx context.Context, ledgerID st
 
 	docBytes, ok := schema.Document.([]byte)
 	if !ok {
+		if mode == ir.SchemaStrict {
+			return fmt.Errorf("schema document has unexpected type %T, expected []byte", schema.Document)
+		}
+		p.logger.Warn("schema document has unexpected type, skipping validation",
+			zap.String("type", fmt.Sprintf("%T", schema.Document)),
+		)
 		return nil
 	}
 

@@ -1,4 +1,4 @@
-.PHONY: build test lint proto migrate-up migrate-down dev-up dev-down clean conformance
+.PHONY: build test lint proto migrate-up migrate-down dev-up dev-down clean conformance docker-build
 
 # Binaries
 SERVER_BIN  := bin/server
@@ -65,8 +65,11 @@ migrate-down:
 
 # ---- Docker ----
 
+docker-build:
+	docker compose -f deploy/docker-compose/docker-compose.yml build
+
 dev-up:
-	docker compose -f deploy/docker-compose/docker-compose.yml up -d
+	docker compose -f deploy/docker-compose/docker-compose.yml up -d --build
 
 dev-down:
 	docker compose -f deploy/docker-compose/docker-compose.yml down

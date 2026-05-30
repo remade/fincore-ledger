@@ -69,6 +69,22 @@ func TestChartOfAccountsValidatePosting(t *testing.T) {
 	}
 }
 
+func TestInvalidPatternRejectedAtParseTime(t *testing.T) {
+	chart := `{
+		"accounts": {
+			"$id": {
+				".pattern": "[invalid(",
+				".self": {}
+			}
+		}
+	}`
+
+	_, err := ParseChartOfAccounts([]byte(chart))
+	if err == nil {
+		t.Fatal("expected parse error for invalid regex pattern")
+	}
+}
+
 func TestNilChart(t *testing.T) {
 	var coa *ChartOfAccounts
 	if err := coa.ValidateAccount("anything:goes"); err != nil {

@@ -21,7 +21,10 @@ func (p *Planner) SubmitSetMetadata(ctx context.Context, ledgerID string, target
 	// Check idempotency (Redis first, then PG).
 	var ikHash []byte
 	if idempotencyKey != "" {
-		metaJSON, _ := json.Marshal(metadata)
+		metaJSON, err := json.Marshal(metadata)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling metadata for idempotency hash: %w", err)
+		}
 		ikHash = computeGenericIdempotencyHash(ledgerID, "set_metadata", fmt.Sprint(targetType), targetID, string(metaJSON))
 		if result, err := p.checkIdempotency(ctx, ledgerID, idempotencyKey, ikHash); err != nil {
 			return nil, err
@@ -30,9 +33,9 @@ func (p *Planner) SubmitSetMetadata(ctx context.Context, ledgerID string, target
 		}
 	}
 
+	now := time.Now().UTC()
 	var result *SubmitResult
 	err := withDeadlockRetry(ctx, 5, func() error {
-		now := time.Now().UTC()
 		eventID := ulid.Make().String()
 
 		batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
@@ -66,7 +69,7 @@ func (p *Planner) SubmitSetMetadata(ctx context.Context, ledgerID string, target
 			LedgerSeq:      seq,
 			SystemTime:     now,
 			ValidTime:      now,
-			Type:           9, // METADATA_SET
+			Type:           storage.EventTypeMetadataSet,
 			Payload:        payload,
 			IdempotencyKey: idempotencyKey,
 			BatchID:        batchID,
@@ -155,9 +158,9 @@ func (p *Planner) SubmitDeleteMetadata(ctx context.Context, ledgerID string, tar
 		}
 	}
 
+	now := time.Now().UTC()
 	var result *SubmitResult
 	err := withDeadlockRetry(ctx, 5, func() error {
-		now := time.Now().UTC()
 		eventID := ulid.Make().String()
 
 		batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
@@ -191,7 +194,7 @@ func (p *Planner) SubmitDeleteMetadata(ctx context.Context, ledgerID string, tar
 			LedgerSeq:      seq,
 			SystemTime:     now,
 			ValidTime:      now,
-			Type:           10, // METADATA_DELETED
+			Type:           storage.EventTypeMetadataDeleted,
 			Payload:        payload,
 			IdempotencyKey: idempotencyKey,
 			BatchID:        batchID,

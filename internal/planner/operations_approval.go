@@ -37,6 +37,7 @@ func (p *Planner) SubmitForApproval(ctx context.Context, ledgerID string, intent
 		ExpiresAt:         expiresAt,
 		State:             "pending",
 		SubmittedBy:       submittedBy,
+		SubmittedAt:       now,
 	}); err != nil {
 		return "", err
 	}
@@ -188,7 +189,7 @@ func (p *Planner) Approve(ctx context.Context, ledgerID, intentID, principal, si
 			} else {
 				if appendErr := auditTx.AppendLogEvent(ctx, storage.LogEventRecord{
 					EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-					SystemTime: now, ValidTime: now, Type: 13, // APPROVAL_RECORDED
+					SystemTime: now, ValidTime: now, Type: storage.EventTypeApprovalRecorded,
 					Payload: approval.IntentPayload,
 					BatchID: batchID, SchemaVersion: 1,
 				}); appendErr != nil {

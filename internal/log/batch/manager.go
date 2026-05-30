@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
+	"go.uber.org/fx"
 	"go.uber.org/zap"
 
 	"github.com/remade/ledger/internal/log/merkle"
@@ -28,8 +29,14 @@ type Manager struct {
 	maxEvents  int
 	maxAge     time.Duration
 
-	mu         sync.Mutex
-	openBatch  map[string]*openBatchState // ledgerID -> state
+	mu         sync.Mutex                        // protects ledgerLocks and openBatch maps
+	ledgerLocks map[string]*sync.Mutex            // per-ledger lock for CreateBatch I/O
+	openBatch  map[string]*openBatchState         // ledgerID -> state
+
+	// shutdownCtx is cancelled when the application stops, ensuring async
+	// batch close goroutines do not outlive the connection pool.
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 type openBatchState struct {
@@ -39,74 +46,91 @@ type openBatchState struct {
 }
 
 // NewManager creates a new batch Manager.
-func NewManager(store storage.Store, logger *zap.Logger) *Manager {
-	return &Manager{
-		store:     store,
-		logger:    logger.Named("batch"),
-		maxEvents: DefaultMaxEvents,
-		maxAge:    DefaultMaxAge,
-		openBatch: make(map[string]*openBatchState),
+func NewManager(lc fx.Lifecycle, store storage.Store, logger *zap.Logger) *Manager {
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &Manager{
+		store:          store,
+		logger:         logger.Named("batch"),
+		maxEvents:      DefaultMaxEvents,
+		maxAge:         DefaultMaxAge,
+		ledgerLocks:    make(map[string]*sync.Mutex),
+		openBatch:      make(map[string]*openBatchState),
+		shutdownCtx:    ctx,
+		shutdownCancel: cancel,
 	}
+	lc.Append(fx.Hook{
+		OnStop: func(_ context.Context) error {
+			cancel()
+			return nil
+		},
+	})
+	return m
 }
 
 // CurrentBatchID returns the current open batch ID for a ledger, creating one if needed.
 func (m *Manager) CurrentBatchID(ctx context.Context, ledgerID string) (string, error) {
+	// Acquire a per-ledger lock so different ledgers don't block each other
+	// during CreateBatch I/O.
+	lmu := m.getLedgerLock(ledgerID)
+	lmu.Lock()
+	defer lmu.Unlock()
+
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if state, ok := m.openBatch[ledgerID]; ok {
-		if state.eventCount < m.maxEvents && time.Since(state.openedAt) < m.maxAge {
-			state.eventCount++
-			return state.batchID, nil
-		}
-		// Batch is full or expired — create new batch first, then close old one async.
-		oldBatchID := state.batchID
-
-		// Create new batch linked to the old one before removing old state.
-		// If creation fails, old batch state is preserved.
-		batchID := ulid.Make().String()
-		if err := m.store.CreateBatch(ctx, storage.BatchRecord{
-			BatchID:     batchID,
-			LedgerID:    ledgerID,
-			OpenedAt:    time.Now().UTC(),
-			PrevBatchID: oldBatchID,
-		}); err != nil {
-			return "", fmt.Errorf("creating batch: %w", err)
-		}
-
-		// New batch created successfully — now safe to remove old state and close async.
-		delete(m.openBatch, ledgerID)
-
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		go func() {
-			defer closeCancel()
-			m.closeBatch(closeCtx, ledgerID, oldBatchID)
-		}()
-
-		m.openBatch[ledgerID] = &openBatchState{
-			batchID:    batchID,
-			openedAt:   time.Now().UTC(),
-			eventCount: 1,
-		}
-		return batchID, nil
+	state, ok := m.openBatch[ledgerID]
+	if ok && state.eventCount < m.maxEvents && time.Since(state.openedAt) < m.maxAge {
+		state.eventCount++
+		m.mu.Unlock()
+		return state.batchID, nil
 	}
+	var oldBatchID string
+	if ok {
+		oldBatchID = state.batchID
+	}
+	m.mu.Unlock()
 
-	// No open batch — create one fresh (lock held to prevent duplicates).
+	// Create batch outside global lock (only per-ledger lock held).
 	batchID := ulid.Make().String()
+	now := time.Now().UTC()
 	if err := m.store.CreateBatch(ctx, storage.BatchRecord{
-		BatchID:  batchID,
-		LedgerID: ledgerID,
-		OpenedAt: time.Now().UTC(),
+		BatchID:     batchID,
+		LedgerID:    ledgerID,
+		OpenedAt:    now,
+		PrevBatchID: oldBatchID,
 	}); err != nil {
 		return "", fmt.Errorf("creating batch: %w", err)
 	}
 
+	// Update state under global lock.
+	m.mu.Lock()
 	m.openBatch[ledgerID] = &openBatchState{
 		batchID:    batchID,
-		openedAt:   time.Now().UTC(),
+		openedAt:   now,
 		eventCount: 1,
 	}
+	m.mu.Unlock()
+
+	// Close old batch async if there was one.
+	if oldBatchID != "" {
+		closeCtx, closeCancel := context.WithTimeout(m.shutdownCtx, 30*time.Second)
+		go func() {
+			defer closeCancel()
+			m.closeBatch(closeCtx, ledgerID, oldBatchID)
+		}()
+	}
+
 	return batchID, nil
+}
+
+// getLedgerLock returns the per-ledger mutex, creating one if needed.
+func (m *Manager) getLedgerLock(ledgerID string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lmu, ok := m.ledgerLocks[ledgerID]
+	if !ok {
+		lmu = &sync.Mutex{}
+		m.ledgerLocks[ledgerID] = lmu
+	}
+	return lmu
 }
 
 // closeBatch closes a batch by computing its Merkle root.

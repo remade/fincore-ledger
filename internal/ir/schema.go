@@ -28,6 +28,8 @@ type ChartNode struct {
 	Children map[string]*ChartNode `json:",omitempty"`
 	// Pattern is a regex constraint for variable segments.
 	Pattern string `json:".pattern,omitempty"`
+	// compiledPattern is the pre-compiled regex for Pattern, set at parse time.
+	compiledPattern *regexp.Regexp
 	// IsLeaf marks this as a valid terminal account.
 	IsLeaf bool `json:".self,omitempty"`
 	// DefaultMetadata is applied when the account is first created.
@@ -71,6 +73,11 @@ func parseNode(data json.RawMessage) (*ChartNode, error) {
 				return nil, fmt.Errorf("unmarshaling .pattern: %w", err)
 			}
 			node.Pattern = p
+			compiled, err := regexp.Compile(p)
+			if err != nil {
+				return nil, fmt.Errorf("compiling pattern %q: %w", p, err)
+			}
+			node.compiledPattern = compiled
 		case ".self":
 			node.IsLeaf = true
 		case ".metadata":
@@ -126,12 +133,8 @@ func (c *ChartOfAccounts) validateSegments(segments []string, nodes map[string]*
 			continue
 		}
 		// Check pattern constraint if any.
-		if node.Pattern != "" {
-			re, err := regexp.Compile(node.Pattern)
-			if err != nil {
-				return fmt.Errorf("invalid pattern %q: %w", node.Pattern, err)
-			}
-			if !re.MatchString(seg) {
+		if node.compiledPattern != nil {
+			if !node.compiledPattern.MatchString(seg) {
 				continue
 			}
 		}
