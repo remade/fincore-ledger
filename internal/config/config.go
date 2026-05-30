@@ -69,6 +69,10 @@ type AuthConfig struct {
 	// AdminPrincipals may use the Import/Export RPCs. When auth is enabled these
 	// are the ONLY principals allowed those operations (empty => none).
 	AdminPrincipals []string
+	// AllowAnonymousAdmin permits the privileged Import/Export RPCs when auth is
+	// disabled. Default false: with auth off, Import/Export are denied unless this
+	// development-only opt-in is explicitly set.
+	AllowAnonymousAdmin bool
 }
 
 // RateLimitConfig configures per-principal request rate limiting. A non-positive
@@ -101,6 +105,7 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.String("auth-audience", "", "Expected JWT audience (aud) claim; empty disables the check")
 	fs.String("auth-issuer", "", "Expected JWT issuer (iss) claim; empty disables the check")
 	fs.String("auth-admin-principals", "", "Comma-separated principals allowed to use Import/Export")
+	fs.Bool("auth-allow-anonymous-admin", false, "Permit Import/Export when auth is disabled (development only)")
 	fs.Bool("rate-limit-enabled", false, "Enable per-principal request rate limiting")
 	fs.Int("rate-limit-read-rps", 0, "Max read requests/sec per principal (0 = unlimited)")
 	fs.Int("rate-limit-write-rps", 0, "Max write requests/sec per principal (0 = unlimited)")
@@ -135,6 +140,7 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 	v.SetDefault("auth.audience", "")
 	v.SetDefault("auth.issuer", "")
 	v.SetDefault("auth.admin_principals", "")
+	v.SetDefault("auth.allow_anonymous_admin", false)
 	v.SetDefault("rate_limit.enabled", false)
 	v.SetDefault("rate_limit.read_rps", 0)
 	v.SetDefault("rate_limit.write_rps", 0)
@@ -180,6 +186,7 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 		bindFlag(v, fs, "auth-audience", "auth.audience")
 		bindFlag(v, fs, "auth-issuer", "auth.issuer")
 		bindFlag(v, fs, "auth-admin-principals", "auth.admin_principals")
+		bindFlag(v, fs, "auth-allow-anonymous-admin", "auth.allow_anonymous_admin")
 		bindFlag(v, fs, "rate-limit-enabled", "rate_limit.enabled")
 		bindFlag(v, fs, "rate-limit-read-rps", "rate_limit.read_rps")
 		bindFlag(v, fs, "rate-limit-write-rps", "rate_limit.write_rps")
@@ -211,12 +218,13 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 			StuckApprovalThreshold: v.GetDuration("worker.stuck_approval_threshold"),
 		},
 		Auth: AuthConfig{
-			Enabled:         v.GetBool("auth.enabled"),
-			Method:          v.GetString("auth.method"),
-			JWKSURL:         v.GetString("auth.jwks_url"),
-			Audience:        v.GetString("auth.audience"),
-			Issuer:          v.GetString("auth.issuer"),
-			AdminPrincipals: splitCSV(v.GetString("auth.admin_principals")),
+			Enabled:             v.GetBool("auth.enabled"),
+			Method:              v.GetString("auth.method"),
+			JWKSURL:             v.GetString("auth.jwks_url"),
+			Audience:            v.GetString("auth.audience"),
+			Issuer:              v.GetString("auth.issuer"),
+			AdminPrincipals:     splitCSV(v.GetString("auth.admin_principals")),
+			AllowAnonymousAdmin: v.GetBool("auth.allow_anonymous_admin"),
 		},
 		RateLimit: RateLimitConfig{
 			Enabled:  v.GetBool("rate_limit.enabled"),
@@ -286,6 +294,9 @@ func (c *Config) validate() error {
 	}
 	if c.Environment == "production" && !c.Auth.Enabled {
 		return fmt.Errorf("config: auth.enabled must be true in the production environment")
+	}
+	if c.Environment == "production" && c.Auth.AllowAnonymousAdmin {
+		return fmt.Errorf("config: auth.allow_anonymous_admin must not be set in the production environment")
 	}
 	if c.RateLimit.Enabled {
 		if c.RateLimit.ReadRPS <= 0 || c.RateLimit.WriteRPS <= 0 {

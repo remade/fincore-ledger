@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/remade/ledger/internal/storage"
 )
 
 // SubmitRevert creates a reverting transaction for an existing transaction. The
@@ -45,7 +47,7 @@ func (p *Planner) SubmitRevert(ctx context.Context, ledgerID, originalTxID strin
 		if idempotencyKey != "" {
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
 		}
-		p.publishEvent(ctx, ledgerID, r.EventID, 7)
+		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeTransactionReverted)
 		p.logger.Debug("transaction reverted",
 			zap.String("event_id", r.EventID),
 			zap.String("original_tx_id", originalTxID),
@@ -55,6 +57,9 @@ func (p *Planner) SubmitRevert(ctx context.Context, ledgerID, originalTxID strin
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil
@@ -99,11 +104,14 @@ func (p *Planner) SubmitAmend(ctx context.Context, ledgerID, originalTxID string
 		if idempotencyKey != "" {
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
 		}
-		p.publishEvent(ctx, ledgerID, r.EventID, 8)
+		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeTransactionAmended)
 		result = r
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil

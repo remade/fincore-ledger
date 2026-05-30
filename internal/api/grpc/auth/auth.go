@@ -57,6 +57,67 @@ func contextWithPrincipal(ctx context.Context, principal string) context.Context
 	return context.WithValue(ctx, principalContextKey{}, principal)
 }
 
+// identityContextKey is an unexported context key for the full authenticated
+// Identity (principal + the ledgers the token may access).
+type identityContextKey struct{}
+
+// allLedgersWildcard in the token's "ledgers" claim grants access to every
+// ledger. Use it for admin/service tokens that are not tenant-scoped.
+const allLedgersWildcard = "*"
+
+// Identity is the authenticated caller: the principal plus the set of ledgers the
+// token is scoped to. It is the tenant-isolation boundary — a caller may only
+// touch ledgers their token names (or all ledgers when the token carries "*").
+type Identity struct {
+	Principal  string
+	ledgers    map[string]bool
+	allLedgers bool
+}
+
+// CanAccessLedger reports whether this identity is permitted to access ledgerID.
+func (i Identity) CanAccessLedger(ledgerID string) bool {
+	return i.allLedgers || i.ledgers[ledgerID]
+}
+
+// AllLedgers reports whether the identity is scoped to every ledger.
+func (i Identity) AllLedgers() bool { return i.allLedgers }
+
+// IdentityFromContext returns the authenticated Identity stored by an auth
+// interceptor. ok is false when the context carries no identity (e.g. when
+// authentication is disabled in development).
+func IdentityFromContext(ctx context.Context) (Identity, bool) {
+	id, ok := ctx.Value(identityContextKey{}).(Identity)
+	return id, ok
+}
+
+func contextWithIdentity(ctx context.Context, id Identity) context.Context {
+	return context.WithValue(ctx, identityContextKey{}, id)
+}
+
+// NewIdentity constructs an Identity from a principal and an explicit ledger
+// allow-list (allLedgers grants access to every ledger). Exported for tests and
+// for callers that establish an identity outside the JWT path.
+func NewIdentity(principal string, ledgers []string, allLedgers bool) Identity {
+	m := make(map[string]bool, len(ledgers))
+	for _, l := range ledgers {
+		m[l] = true
+	}
+	return Identity{Principal: principal, ledgers: m, allLedgers: allLedgers}
+}
+
+// ContextWithIdentity returns a context carrying id. Exported for tests and for
+// establishing an identity outside the interceptor path.
+func ContextWithIdentity(ctx context.Context, id Identity) context.Context {
+	return contextWithIdentity(ctx, id)
+}
+
+// IdentityAuthenticator is implemented by authenticators that can surface the
+// full Identity (principal + ledger scope), not just the principal. Interceptors
+// use it when available so handlers can enforce per-ledger authorization.
+type IdentityAuthenticator interface {
+	AuthenticateIdentity(ctx context.Context) (Identity, error)
+}
+
 // Authenticator validates the credentials carried by an incoming request and
 // returns the principal identity they represent.
 type Authenticator interface {
@@ -94,9 +155,19 @@ func NewJWTAuthenticator(ctx context.Context, jwksURL, audience, issuer string) 
 }
 
 func (a *jwtAuthenticator) Authenticate(ctx context.Context) (string, error) {
-	raw, err := bearerToken(ctx)
+	id, err := a.AuthenticateIdentity(ctx)
 	if err != nil {
 		return "", err
+	}
+	return id.Principal, nil
+}
+
+// AuthenticateIdentity verifies the bearer JWT and returns the full Identity:
+// the subject (principal) plus the ledger scope from the optional "ledgers" claim.
+func (a *jwtAuthenticator) AuthenticateIdentity(ctx context.Context) (Identity, error) {
+	raw, err := bearerToken(ctx)
+	if err != nil {
+		return Identity{}, err
 	}
 	opts := []jwt.ParseOption{
 		// InferAlgorithmFromKey lets verification succeed against JWKS keys that
@@ -116,13 +187,41 @@ func (a *jwtAuthenticator) Authenticate(ctx context.Context) (string, error) {
 	}
 	token, err := jwt.Parse([]byte(raw), opts...)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrUnauthenticated, err)
+		return Identity{}, fmt.Errorf("%w: %v", ErrUnauthenticated, err)
 	}
 	sub := token.Subject()
 	if sub == "" {
-		return "", fmt.Errorf("%w: token has empty subject claim", ErrUnauthenticated)
+		return Identity{}, fmt.Errorf("%w: token has empty subject claim", ErrUnauthenticated)
 	}
-	return sub, nil
+	ledgers, all := parseLedgersClaim(token)
+	return Identity{Principal: sub, ledgers: ledgers, allLedgers: all}, nil
+}
+
+// parseLedgersClaim reads the optional "ledgers" claim — a JSON array of ledger
+// IDs the token may access, where the element "*" grants access to all ledgers.
+// An absent/empty/malformed claim yields no ledger access (default-deny), so a
+// token must explicitly carry its scope.
+func parseLedgersClaim(token jwt.Token) (ledgers map[string]bool, allLedgers bool) {
+	v, ok := token.Get("ledgers")
+	if !ok {
+		return nil, false
+	}
+	raw, ok := v.([]any)
+	if !ok {
+		return nil, false
+	}
+	ledgers = make(map[string]bool, len(raw))
+	for _, e := range raw {
+		s, ok := e.(string)
+		if !ok {
+			continue
+		}
+		if s == allLedgersWildcard {
+			return nil, true
+		}
+		ledgers[s] = true
+	}
+	return ledgers, false
 }
 
 // bearerToken extracts the raw token from the authorization request metadata.
@@ -154,6 +253,25 @@ func methodIsExempt(fullMethod string) bool {
 		strings.HasPrefix(fullMethod, "/grpc.reflection.")
 }
 
+// authenticateAndInject authenticates the request and returns a context carrying
+// the principal and, when the authenticator exposes it, the full Identity (so
+// handlers can enforce per-ledger authorization). The original context is
+// returned unchanged on error.
+func authenticateAndInject(ctx context.Context, authn Authenticator) (context.Context, error) {
+	if ia, ok := authn.(IdentityAuthenticator); ok {
+		id, err := ia.AuthenticateIdentity(ctx)
+		if err != nil {
+			return ctx, err
+		}
+		return contextWithIdentity(contextWithPrincipal(ctx, id.Principal), id), nil
+	}
+	principal, err := authn.Authenticate(ctx)
+	if err != nil {
+		return ctx, err
+	}
+	return contextWithPrincipal(ctx, principal), nil
+}
+
 // NewUnaryServerInterceptor authenticates unary RPCs and injects the principal
 // into the handler context. Requests that fail authentication are rejected with
 // codes.Unauthenticated before reaching the handler.
@@ -167,12 +285,12 @@ func NewUnaryServerInterceptor(authn Authenticator, logger *zap.Logger) grpc.Una
 			// Defense in depth: a nil authenticator must never fall open.
 			return nil, status.Error(codes.Unauthenticated, "authentication required")
 		}
-		principal, err := authn.Authenticate(ctx)
+		authCtx, err := authenticateAndInject(ctx, authn)
 		if err != nil {
 			log.Debug("authentication rejected", zap.String("method", info.FullMethod), zap.Error(err))
 			return nil, status.Error(codes.Unauthenticated, "authentication required")
 		}
-		return handler(contextWithPrincipal(ctx, principal), req)
+		return handler(authCtx, req)
 	}
 }
 
@@ -188,12 +306,12 @@ func NewStreamServerInterceptor(authn Authenticator, logger *zap.Logger) grpc.St
 			// Defense in depth: a nil authenticator must never fall open.
 			return status.Error(codes.Unauthenticated, "authentication required")
 		}
-		principal, err := authn.Authenticate(ss.Context())
+		authCtx, err := authenticateAndInject(ss.Context(), authn)
 		if err != nil {
 			log.Debug("authentication rejected", zap.String("method", info.FullMethod), zap.Error(err))
 			return status.Error(codes.Unauthenticated, "authentication required")
 		}
-		return handler(srv, &principalStream{ServerStream: ss, ctx: contextWithPrincipal(ss.Context(), principal)})
+		return handler(srv, &principalStream{ServerStream: ss, ctx: authCtx})
 	}
 }
 

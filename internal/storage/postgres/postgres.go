@@ -158,7 +158,10 @@ func NewStandalone(dsn string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to postgres: %w", err)
 	}
-	logger, _ := zap.NewProduction()
+	logger, err := zap.NewProduction()
+	if err != nil {
+		logger = zap.NewNop()
+	}
 	return &DB{pool: pool, logger: logger.Named("postgres")}, nil
 }
 

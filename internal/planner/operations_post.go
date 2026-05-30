@@ -59,17 +59,9 @@ func (p *Planner) SubmitPost(ctx context.Context, ledgerID string, postings []Po
 
 		r, err := p.doPostInTx(ctx, txStore, ledger, postings, reference, metadata, idempotencyKey, ikHash, vt, now, dryRun)
 		if err != nil {
-			// A concurrent writer committed the same idempotency key: return the
-			// existing event as an idempotent hit instead of failing.
-			if errors.Is(err, storage.ErrIdempotencyKeyConflict) {
-				txStore.Rollback()
-				ikRecord, err2 := p.store.GetIdempotencyKey(ctx, ledgerID, idempotencyKey)
-				if err2 != nil || ikRecord == nil {
-					return storage.ErrIdempotencyKeyConflict
-				}
-				result = &SubmitResult{EventID: ikRecord.EventID, IdempotentHit: true}
-				return nil
-			}
+			// A concurrent writer committing the same idempotency key surfaces as
+			// ErrIdempotencyKeyConflict; the deferred rollback fires and the outer
+			// handler resolves it to an idempotent hit.
 			return err
 		}
 
@@ -86,7 +78,7 @@ func (p *Planner) SubmitPost(ctx context.Context, ledgerID string, postings []Po
 		if idempotencyKey != "" {
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
 		}
-		p.publishEvent(ctx, ledgerID, r.EventID, 1)
+		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeTransactionPosted)
 		p.logger.Debug("transaction posted",
 			zap.String("event_id", r.EventID),
 			zap.String("ledger", ledgerID),
@@ -96,6 +88,9 @@ func (p *Planner) SubmitPost(ctx context.Context, ledgerID string, postings []Po
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil
@@ -209,8 +204,11 @@ func (p *Planner) checkIdempotency(ctx context.Context, ledgerID, idempotencyKey
 		if string(ikRecord.IdempotencyHash) != string(ikHash) {
 			return nil, storage.ErrInvalidIdempotencyInput
 		}
-		// Populate Redis for next time.
-		p.redis.SetIdempotencyKey(ctx, ledgerID, idempotencyKey, ikRecord.EventID, ikRecord.IdempotencyHash)
+		// Populate Redis for next time. A failure only degrades the L1 cache to a
+		// no-op (PG L2 stays authoritative), so log and continue rather than fail.
+		if err := p.redis.SetIdempotencyKey(ctx, ledgerID, idempotencyKey, ikRecord.EventID, ikRecord.IdempotencyHash); err != nil {
+			p.logger.Warn("populating redis idempotency cache failed", zap.Error(err))
+		}
 		return &SubmitResult{EventID: ikRecord.EventID, IdempotentHit: true}, nil
 	}
 
@@ -232,7 +230,9 @@ func (p *Planner) recordIdempotency(ctx context.Context, txStore storage.TxStore
 
 // postCommitIdempotency populates Redis cache after a successful commit.
 func (p *Planner) postCommitIdempotency(ctx context.Context, ledgerID, idempotencyKey, eventID string, ikHash []byte) {
-	p.redis.SetIdempotencyKey(ctx, ledgerID, idempotencyKey, eventID, ikHash)
+	if err := p.redis.SetIdempotencyKey(ctx, ledgerID, idempotencyKey, eventID, ikHash); err != nil {
+		p.logger.Warn("populating redis idempotency cache after commit failed", zap.Error(err))
+	}
 }
 
 func writeHashField(h io.Writer, data []byte) {

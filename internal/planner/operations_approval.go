@@ -243,7 +243,7 @@ func (p *Planner) recordApprovalAuditEvent(ctx context.Context, ledgerID, intent
 			zap.Error(err))
 		return
 	}
-	p.publishEvent(ctx, ledgerID, eventID, 13)
+	p.publishEvent(ctx, ledgerID, eventID, storage.EventTypeApprovalRecorded)
 }
 
 // approvalExecutionKey returns the idempotency key used to execute an approved

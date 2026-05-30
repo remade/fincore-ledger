@@ -30,6 +30,28 @@ import (
 	pb "github.com/remade/ledger/pkg/proto/ledger/v1"
 )
 
+// Server resource limits. These bound memory/connection exhaustion vectors; the
+// gRPC server carries the primary protection since the REST gateway only proxies
+// to it over loopback.
+const (
+	// maxRecvMsgBytes caps a single inbound gRPC message (matches the library
+	// default, set explicitly so it is a reviewed value rather than an implicit one).
+	maxRecvMsgBytes = 4 << 20 // 4 MiB
+	// maxConcurrentStreams bounds simultaneous in-flight RPCs per connection.
+	maxConcurrentStreams = 256
+	// grpcConnectionTimeout bounds the time allowed to establish a connection
+	// (including TLS/HTTP2 handshake) before it is closed.
+	grpcConnectionTimeout = 30 * time.Second
+
+	// httpReadHeaderTimeout is the Slowloris defense: a client must send full
+	// request headers within this window. httpIdleTimeout bounds keep-alive idling.
+	// ReadTimeout/WriteTimeout are intentionally left unset (0): the gateway proxies
+	// server-streaming RPCs (Subscribe/Export need unbounded write; client-streaming
+	// Import needs unbounded read), which a fixed timeout would sever.
+	httpReadHeaderTimeout = 10 * time.Second
+	httpIdleTimeout       = 120 * time.Second
+)
+
 func main() {
 	fs := pflag.NewFlagSet("server", pflag.ExitOnError)
 	config.RegisterFlags(fs)
@@ -111,6 +133,9 @@ func newGRPCServer(cfg *config.Config, authn auth.Authenticator, rl *ratelimit.L
 	stream = append(stream, loggingStreamInterceptor(logger))
 
 	srv := grpc.NewServer(
+		grpc.MaxRecvMsgSize(maxRecvMsgBytes),
+		grpc.MaxConcurrentStreams(maxConcurrentStreams),
+		grpc.ConnectionTimeout(grpcConnectionTimeout),
 		grpc.ChainUnaryInterceptor(unary...),
 		grpc.ChainStreamInterceptor(stream...),
 	)
@@ -217,8 +242,10 @@ func newHTTPServer(cfg config.HTTPConfig, grpcCfg config.GRPCConfig, db *postgre
 	)
 
 	return &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
-		Handler: mux,
+		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Handler:           mux,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
 	}, nil
 }
 

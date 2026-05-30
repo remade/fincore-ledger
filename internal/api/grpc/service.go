@@ -36,6 +36,10 @@ type LedgerService struct {
 	// authEnabled and adminPrincipals gate the privileged Import/Export RPCs.
 	authEnabled     bool
 	adminPrincipals map[string]bool
+	// allowAnonymousAdmin permits Import/Export when auth is disabled. It must be
+	// set explicitly (a development-only opt-in); without it, Import/Export are
+	// denied whenever there is no authenticated admin principal.
+	allowAnonymousAdmin bool
 }
 
 // NewLedgerService creates a new LedgerService.
@@ -45,22 +49,44 @@ func NewLedgerService(store storage.Store, p *planner.Planner, bm *batch.Manager
 		admins[a] = true
 	}
 	return &LedgerService{
-		store:           store,
-		planner:         p,
-		batch:           bm,
-		subs:            sm,
-		logger:          logger.Named("api"),
-		authEnabled:     authCfg.Enabled,
-		adminPrincipals: admins,
+		store:               store,
+		planner:             p,
+		batch:               bm,
+		subs:                sm,
+		logger:              logger.Named("api"),
+		authEnabled:         authCfg.Enabled,
+		adminPrincipals:     admins,
+		allowAnonymousAdmin: authCfg.AllowAnonymousAdmin,
 	}
 }
 
-// requireImportExportAuthz gates the privileged Import/Export RPCs. When auth is
-// enabled, only configured admin principals are permitted (default-deny). When
-// auth is disabled (development), the operations are open for convenience.
+// authorizeLedger enforces tenant isolation: an authenticated caller may only
+// access ledgers their token is scoped to via the "ledgers" JWT claim ("*" grants
+// all). When authentication is disabled (development) no Identity is present, so
+// access is allowed for local convenience.
+func (s *LedgerService) authorizeLedger(ctx context.Context, ledgerID string) error {
+	id, ok := auth.IdentityFromContext(ctx)
+	if !ok {
+		return nil // auth disabled (development): no tenant scope to enforce
+	}
+	if id.CanAccessLedger(ledgerID) {
+		return nil
+	}
+	return status.Errorf(codes.PermissionDenied, "principal %q is not authorized for ledger %q", id.Principal, ledgerID)
+}
+
+// requireImportExportAuthz gates the privileged Import/Export RPCs. These read
+// from / write to the raw source-of-truth log, so they default-deny: when auth is
+// enabled only configured admin principals are permitted; when auth is disabled
+// they are denied unless an explicit development opt-in (allowAnonymousAdmin) is
+// set. This stops a non-production deploy from silently exposing them.
 func (s *LedgerService) requireImportExportAuthz(principal string) error {
 	if !s.authEnabled {
-		return nil
+		if s.allowAnonymousAdmin {
+			return nil
+		}
+		return status.Error(codes.PermissionDenied,
+			"import/export requires an authenticated admin principal (set auth.allow_anonymous_admin to permit anonymously in development)")
 	}
 	if s.adminPrincipals[principal] {
 		return nil
@@ -69,6 +95,9 @@ func (s *LedgerService) requireImportExportAuthz(principal string) error {
 }
 
 func (s *LedgerService) CreateLedger(ctx context.Context, req *pb.CreateLedgerRequest) (*pb.Ledger, error) {
+	if err := s.authorizeLedger(ctx, req.Id); err != nil {
+		return nil, err
+	}
 	meta := make(map[string]string)
 	if req.Metadata != nil {
 		meta = req.Metadata
@@ -88,6 +117,9 @@ func (s *LedgerService) CreateLedger(ctx context.Context, req *pb.CreateLedgerRe
 }
 
 func (s *LedgerService) GetLedger(ctx context.Context, req *pb.GetLedgerRequest) (*pb.Ledger, error) {
+	if err := s.authorizeLedger(ctx, req.Id); err != nil {
+		return nil, err
+	}
 	rec, err := s.store.GetLedger(ctx, req.Id)
 	if err != nil {
 		if isNotFound(err) {
@@ -106,14 +138,23 @@ func (s *LedgerService) ListLedgers(ctx context.Context, req *pb.ListLedgersRequ
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "listing ledgers: %v", err)
 	}
+	// Filter to the ledgers the caller's token is scoped to (tenant isolation).
+	// When auth is disabled (development) no Identity is present and all are shown.
+	id, scoped := auth.IdentityFromContext(ctx)
 	resp := &pb.ListLedgersResponse{NextPageToken: nextToken}
 	for i := range recs {
+		if scoped && !id.CanAccessLedger(recs[i].ID) {
+			continue
+		}
 		resp.Ledgers = append(resp.Ledgers, ledgerRecordToProto(&recs[i]))
 	}
 	return resp, nil
 }
 
 func (s *LedgerService) SealLedger(ctx context.Context, req *pb.SealLedgerRequest) (*pb.Ledger, error) {
+	if err := s.authorizeLedger(ctx, req.Id); err != nil {
+		return nil, err
+	}
 	rec, err := s.store.SealLedger(ctx, req.Id)
 	if err != nil {
 		if isNotFound(err) {
@@ -136,6 +177,9 @@ func (s *LedgerService) Submit(ctx context.Context, req *pb.SubmitRequest) (*pb.
 	// Policy enforcement: evaluate active policy before executing.
 	principal := extractPrincipal(ctx)
 	opType, accountsTouched := classifyIntent(intent)
+	if err := s.authorizeLedger(ctx, intent.LedgerId); err != nil {
+		return nil, err
+	}
 	if err := s.planner.EvaluatePolicy(ctx, intent.LedgerId, principal, opType, accountsTouched); err != nil {
 		if errors.Is(err, storage.ErrPolicyDenied) {
 			// Write denial audit event, then return error.
@@ -268,6 +312,9 @@ func (s *LedgerService) handleInsertSchema(ctx context.Context, intent *pb.Inten
 }
 
 func (s *LedgerService) GetTransaction(ctx context.Context, req *pb.GetTransactionRequest) (*pb.Transaction, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	rec, err := s.store.GetTransaction(ctx, req.LedgerId, req.TransactionId)
 	if err != nil {
 		if isNotFound(err) {
@@ -279,6 +326,9 @@ func (s *LedgerService) GetTransaction(ctx context.Context, req *pb.GetTransacti
 }
 
 func (s *LedgerService) ListTransactions(ctx context.Context, req *pb.ListTransactionsRequest) (*pb.ListTransactionsResponse, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	recs, nextToken, err := s.store.ListTransactions(ctx, req.LedgerId, storage.ListTransactionsParams{
 		ListParams: storage.ListParams{
 			PageSize:  int(req.PageSize),
@@ -296,6 +346,9 @@ func (s *LedgerService) ListTransactions(ctx context.Context, req *pb.ListTransa
 }
 
 func (s *LedgerService) GetAccount(ctx context.Context, req *pb.GetAccountRequest) (*pb.Account, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	rec, err := s.store.GetAccount(ctx, req.LedgerId, req.Address)
 	if err != nil {
 		if isNotFound(err) {
@@ -307,6 +360,9 @@ func (s *LedgerService) GetAccount(ctx context.Context, req *pb.GetAccountReques
 }
 
 func (s *LedgerService) ListAccounts(ctx context.Context, req *pb.ListAccountsRequest) (*pb.ListAccountsResponse, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	recs, nextToken, err := s.store.ListAccounts(ctx, req.LedgerId, storage.ListAccountsParams{
 		ListParams: storage.ListParams{
 			PageSize:  int(req.PageSize),
@@ -339,6 +395,9 @@ func (s *LedgerService) GetBalance(ctx context.Context, req *pb.GetBalanceReques
 		return nil, status.Error(codes.InvalidArgument, "asset is required for GetBalance")
 	}
 
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	bal, err := s.store.GetBalance(ctx, req.LedgerId, req.Account, asset, asOfValid, asOfSystem)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "getting balance: %v", err)
@@ -377,6 +436,9 @@ func (s *LedgerService) GetAggregatedBalances(ctx context.Context, req *pb.GetAg
 		asOfSystem = &t
 	}
 
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	balances, err := s.store.GetAggregatedBalances(ctx, req.LedgerId, req.AddressPattern, asOfValid, asOfSystem)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "getting aggregated balances: %v", err)
@@ -390,6 +452,9 @@ func (s *LedgerService) GetAggregatedBalances(ctx context.Context, req *pb.GetAg
 }
 
 func (s *LedgerService) GetSchema(ctx context.Context, req *pb.GetSchemaRequest) (*pb.Schema, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	rec, err := s.store.GetSchema(ctx, req.LedgerId, req.Version)
 	if err != nil {
 		if isNotFound(err) {
@@ -420,6 +485,9 @@ func (s *LedgerService) GetSchema(ctx context.Context, req *pb.GetSchemaRequest)
 }
 
 func (s *LedgerService) ListLogEvents(ctx context.Context, req *pb.ListLogEventsRequest) (*pb.ListLogEventsResponse, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	recs, nextToken, err := s.store.ListLogEvents(ctx, req.LedgerId, storage.ListParams{
 		PageSize:  int(req.PageSize),
 		PageToken: req.PageToken,
@@ -435,6 +503,9 @@ func (s *LedgerService) ListLogEvents(ctx context.Context, req *pb.ListLogEvents
 }
 
 func (s *LedgerService) GetLogEvent(ctx context.Context, req *pb.GetLogEventRequest) (*pb.LogEvent, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	rec, err := s.store.GetLogEvent(ctx, req.LedgerId, req.EventId)
 	if err != nil {
 		if isNotFound(err) {
@@ -493,6 +564,16 @@ func (s *LedgerService) Export(req *pb.ExportRequest, stream pb.LedgerService_Ex
 	return nil
 }
 
+const (
+	// maxImportEventsPerCall bounds the number of events a single Import stream may
+	// submit, preventing an unbounded client stream from exhausting server resources.
+	maxImportEventsPerCall = 100_000
+	// maxImportClockSkew bounds how far an imported event's system_time may lead the
+	// server clock. system_time records when an event was persisted, so a future
+	// value signals a forged or replayed record.
+	maxImportClockSkew = 5 * time.Minute
+)
+
 // validateImportEvent checks the structural validity of an event before it is
 // written directly to the log via Import.
 func validateImportEvent(event *pb.LogEvent) error {
@@ -502,14 +583,16 @@ func validateImportEvent(event *pb.LogEvent) error {
 	if event.EventId == "" {
 		return status.Error(codes.InvalidArgument, "event event_id is required")
 	}
-	if event.Type <= 0 {
-		return status.Errorf(codes.InvalidArgument, "event %q has invalid type %d", event.EventId, event.Type)
-	}
-	if _, ok := pb.EventType_name[int32(event.Type)]; !ok {
-		return status.Errorf(codes.InvalidArgument, "event %q has unknown event type %d", event.EventId, event.Type)
-	}
 	if len(event.Payload) == 0 {
 		return status.Errorf(codes.InvalidArgument, "event %q has an empty payload", event.EventId)
+	}
+	if !json.Valid(event.Payload) {
+		return status.Errorf(codes.InvalidArgument, "event %q payload is not valid JSON", event.EventId)
+	}
+	// Bound on the int32 before narrowing to int16 so a large value cannot wrap
+	// into the valid range. Event types are the contiguous range 1..max.
+	if int32(event.Type) < 1 || int32(event.Type) > int32(storage.EventTypeApprovalRecorded) {
+		return status.Errorf(codes.InvalidArgument, "event %q has unknown event type %d", event.EventId, event.Type)
 	}
 	if event.SystemTime == nil || event.ValidTime == nil {
 		return status.Errorf(codes.InvalidArgument, "event %q is missing system_time or valid_time", event.EventId)
@@ -526,9 +609,13 @@ func (s *LedgerService) Import(stream pb.LedgerService_ImportServer) error {
 		return err
 	}
 	var count int64
-	// authorized caches the per-ledger policy + sealed check so it runs once per
-	// distinct target ledger rather than per event.
-	authorized := make(map[string]bool)
+	// Per-ledger import state. expectedSeq is the next ledger_seq we require: imports
+	// must be a strict, contiguous sequence starting at 1 into a *fresh* ledger, so a
+	// client cannot collide with or reorder existing history. batchIDs holds the
+	// server-assigned batch for each ledger; client-supplied batch ids are never
+	// trusted (a forged batch id could poison a closed batch's Merkle verification).
+	expectedSeq := make(map[string]int64)
+	batchIDs := make(map[string]string)
 
 	for {
 		event, err := stream.Recv()
@@ -539,13 +626,22 @@ func (s *LedgerService) Import(stream pb.LedgerService_ImportServer) error {
 			return status.Errorf(codes.Internal, "receiving event: %v", err)
 		}
 
-		// Validate event structure before it touches the log.
+		// Bound the per-call stream so a single Import cannot exhaust server memory
+		// or run unboundedly. Clients with larger migrations chunk across calls.
+		if count >= maxImportEventsPerCall {
+			return status.Errorf(codes.ResourceExhausted,
+				"import exceeds per-call limit of %d events; split into multiple calls", maxImportEventsPerCall)
+		}
+
+		// Validate event structure (type, payload JSON, required fields) before it
+		// touches the log.
 		if err := validateImportEvent(event); err != nil {
 			return err
 		}
 
-		// Authorize and verify the ledger is not sealed before writing.
-		if !authorized[event.LedgerId] {
+		// First event for a ledger: authorize, verify the ledger exists, is not
+		// sealed, and is EMPTY, then allocate a server-controlled batch.
+		if _, seen := expectedSeq[event.LedgerId]; !seen {
 			if err := s.planner.EvaluatePolicy(ctx, event.LedgerId, principal, "import", nil); err != nil {
 				return mapPlannerError(err)
 			}
@@ -559,7 +655,32 @@ func (s *LedgerService) Import(stream pb.LedgerService_ImportServer) error {
 			if ledger.State == "sealed" {
 				return status.Errorf(codes.FailedPrecondition, "ledger %q is sealed; import rejected", event.LedgerId)
 			}
-			authorized[event.LedgerId] = true
+			existing, _, err := s.store.ListLogEvents(ctx, event.LedgerId, storage.ListParams{PageSize: 1})
+			if err != nil {
+				return status.Errorf(codes.Internal, "checking ledger emptiness: %v", err)
+			}
+			if len(existing) > 0 {
+				return status.Errorf(codes.FailedPrecondition,
+					"ledger %q already has events; import only restores into an empty ledger", event.LedgerId)
+			}
+			batchID, err := s.batch.CurrentBatchID(ctx, event.LedgerId)
+			if err != nil {
+				return status.Errorf(codes.Internal, "allocating import batch: %v", err)
+			}
+			expectedSeq[event.LedgerId] = 1
+			batchIDs[event.LedgerId] = batchID
+		}
+
+		// Integrity checks against forged/replayed fields. valid_time stays
+		// client-controlled by design (it is the logical effective time); system_time
+		// (the persistence time) may not be in the future, and the sequence must be
+		// strictly contiguous so ordering cannot be tampered with.
+		if event.SystemTime.AsTime().After(time.Now().UTC().Add(maxImportClockSkew)) {
+			return status.Errorf(codes.InvalidArgument, "event %q system_time is in the future", event.EventId)
+		}
+		if want := expectedSeq[event.LedgerId]; uint64(want) != event.LedgerSeq {
+			return status.Errorf(codes.InvalidArgument,
+				"event %q has non-contiguous ledger_seq %d (expected %d)", event.EventId, event.LedgerSeq, want)
 		}
 
 		if err := s.store.AppendLogEvent(ctx, storage.LogEventRecord{
@@ -571,7 +692,7 @@ func (s *LedgerService) Import(stream pb.LedgerService_ImportServer) error {
 			Type:           int16(event.Type),
 			Payload:        event.Payload,
 			IdempotencyKey: event.IdempotencyKey,
-			BatchID:        event.BatchId,
+			BatchID:        batchIDs[event.LedgerId], // server-assigned; client batch_id is not trusted
 			SchemaVersion:  int64(event.SchemaVersion),
 		}); err != nil {
 			if errors.Is(err, storage.ErrIdempotencyKeyConflict) {
@@ -579,6 +700,7 @@ func (s *LedgerService) Import(stream pb.LedgerService_ImportServer) error {
 			}
 			return status.Errorf(codes.Internal, "importing event: %v", err)
 		}
+		expectedSeq[event.LedgerId]++
 		count++
 	}
 	return stream.SendAndClose(&pb.ImportResponse{EventsImported: count})
@@ -590,6 +712,9 @@ func (s *LedgerService) Subscribe(req *pb.SubscribeRequest, stream pb.LedgerServ
 		eventTypes = append(eventTypes, int16(t))
 	}
 
+	if err := s.authorizeLedger(stream.Context(), req.LedgerId); err != nil {
+		return err
+	}
 	ch, cancel, err := s.subs.Subscribe(stream.Context(), req.LedgerId, eventTypes, req.FromEventId, s.store)
 	if err != nil {
 		return status.Errorf(codes.Internal, "subscribing: %v", err)
@@ -925,6 +1050,9 @@ func (s *LedgerService) SubmitForApproval(ctx context.Context, req *pb.SubmitFor
 
 	expiresIn := time.Duration(req.ExpiresInSeconds) * time.Second
 
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	intentID, err := s.planner.SubmitForApproval(ctx, req.LedgerId, req.IntentPayload, req.RequiredApprovers, submittedBy, expiresIn)
 	if err != nil {
 		return nil, mapPlannerError(err)
@@ -944,6 +1072,9 @@ func (s *LedgerService) ApproveIntent(ctx context.Context, req *pb.ApproveIntent
 	// Always derive principal from authenticated context, never trust client input.
 	principal := extractPrincipal(ctx)
 
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	result, err := s.planner.Approve(ctx, req.LedgerId, req.IntentId, principal, req.Signature)
 	if err != nil {
 		return nil, mapPlannerError(err)
@@ -969,6 +1100,9 @@ func (s *LedgerService) ListPendingApprovals(ctx context.Context, req *pb.ListPe
 		return nil, status.Error(codes.InvalidArgument, "ledger_id is required")
 	}
 
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	recs, nextToken, err := s.store.ListPendingApprovals(ctx, req.LedgerId, storage.ListParams{
 		PageSize:  int(req.PageSize),
 		PageToken: req.PageToken,
@@ -1006,6 +1140,9 @@ func pendingApprovalRecordToProto(rec *storage.PendingApprovalRecord) *pb.Pendin
 }
 
 func (s *LedgerService) GetHold(ctx context.Context, req *pb.GetHoldRequest) (*pb.Hold, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	rec, err := s.store.GetHold(ctx, req.LedgerId, req.HoldId)
 	if err != nil {
 		if isNotFound(err) {
@@ -1017,6 +1154,9 @@ func (s *LedgerService) GetHold(ctx context.Context, req *pb.GetHoldRequest) (*p
 }
 
 func (s *LedgerService) ListHolds(ctx context.Context, req *pb.ListHoldsRequest) (*pb.ListHoldsResponse, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	recs, nextToken, err := s.store.ListHolds(ctx, req.LedgerId, storage.ListHoldsParams{
 		ListParams: storage.ListParams{PageSize: int(req.PageSize), PageToken: req.PageToken},
 		Account:    req.Account,
@@ -1032,6 +1172,9 @@ func (s *LedgerService) ListHolds(ctx context.Context, req *pb.ListHoldsRequest)
 }
 
 func (s *LedgerService) GetRelationships(ctx context.Context, req *pb.GetRelationshipsRequest) (*pb.GetRelationshipsResponse, error) {
+	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
+		return nil, err
+	}
 	rels, err := s.store.GetRelationships(ctx, req.LedgerId, req.TransactionId, int(req.Depth))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "getting relationships: %v", err)

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/remade/ledger/internal/storage"
 )
 
 // ConvertParams holds the parameters for a conversion operation.
@@ -73,7 +75,7 @@ func (p *Planner) SubmitConvert(ctx context.Context, ledgerID string, params Con
 		if idempotencyKey != "" {
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
 		}
-		p.publishEvent(ctx, ledgerID, r.EventID, 6)
+		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeConversionCreated)
 		p.logger.Debug("conversion recorded",
 			zap.String("conversion_id", r.ConversionID),
 			zap.String("source_asset", params.SourceAsset),
@@ -84,6 +86,9 @@ func (p *Planner) SubmitConvert(ctx context.Context, ledgerID string, params Con
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil

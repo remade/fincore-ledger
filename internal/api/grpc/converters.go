@@ -112,6 +112,11 @@ func mapPlannerError(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, storage.ErrInvalidIdempotencyInput):
 		return status.Error(codes.FailedPrecondition, "idempotency key exists with different input")
+	case errors.Is(err, storage.ErrIdempotencyKeyConflict):
+		// A concurrent writer committed the same key but the committed record could
+		// not be re-read; the operation likely succeeded — signal a retryable race
+		// rather than a server fault.
+		return status.Error(codes.Aborted, "concurrent idempotency-key conflict; retry to observe the committed result")
 	case errors.Is(err, storage.ErrLedgerSealed):
 		return status.Error(codes.FailedPrecondition, "ledger is sealed")
 	case errors.Is(err, storage.ErrTransactionReferenceConflict):

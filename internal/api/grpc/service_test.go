@@ -29,15 +29,16 @@ func TestValidateImportEvent_Valid(t *testing.T) {
 
 func TestValidateImportEvent_Rejects(t *testing.T) {
 	cases := map[string]func(*pb.LogEvent){
-		"empty ledger_id": func(e *pb.LogEvent) { e.LedgerId = "" },
-		"empty event_id":  func(e *pb.LogEvent) { e.EventId = "" },
-		"zero type":       func(e *pb.LogEvent) { e.Type = pb.EventType(0) },
-		"negative type":   func(e *pb.LogEvent) { e.Type = pb.EventType(-1) },
-		"unknown type":    func(e *pb.LogEvent) { e.Type = pb.EventType(9999) },
-		"nil payload":     func(e *pb.LogEvent) { e.Payload = nil },
-		"empty payload":   func(e *pb.LogEvent) { e.Payload = []byte{} },
-		"no system_time":  func(e *pb.LogEvent) { e.SystemTime = nil },
-		"no valid_time":   func(e *pb.LogEvent) { e.ValidTime = nil },
+		"empty ledger_id":  func(e *pb.LogEvent) { e.LedgerId = "" },
+		"empty event_id":   func(e *pb.LogEvent) { e.EventId = "" },
+		"zero type":        func(e *pb.LogEvent) { e.Type = pb.EventType(0) },
+		"negative type":    func(e *pb.LogEvent) { e.Type = pb.EventType(-1) },
+		"unknown type":     func(e *pb.LogEvent) { e.Type = pb.EventType(9999) },
+		"non-json payload": func(e *pb.LogEvent) { e.Payload = []byte("not json{") },
+		"nil payload":      func(e *pb.LogEvent) { e.Payload = nil },
+		"empty payload":    func(e *pb.LogEvent) { e.Payload = []byte{} },
+		"no system_time":   func(e *pb.LogEvent) { e.SystemTime = nil },
+		"no valid_time":    func(e *pb.LogEvent) { e.ValidTime = nil },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -51,8 +52,14 @@ func TestValidateImportEvent_Rejects(t *testing.T) {
 }
 
 func TestRequireImportExportAuthz(t *testing.T) {
-	// Auth disabled (dev): Import/Export are open for convenience.
-	open := &LedgerService{authEnabled: false}
+	// Auth disabled without the explicit opt-in: default-deny.
+	denied := &LedgerService{authEnabled: false}
+	err0 := denied.requireImportExportAuthz("anyone")
+	require.Error(t, err0)
+	assert.Equal(t, codes.PermissionDenied, status.Code(err0))
+
+	// Auth disabled with the development opt-in: allowed.
+	open := &LedgerService{authEnabled: false, allowAnonymousAdmin: true}
 	require.NoError(t, open.requireImportExportAuthz("anyone"))
 
 	// Auth enabled, empty admin set: default-deny.

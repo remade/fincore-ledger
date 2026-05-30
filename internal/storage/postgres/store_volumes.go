@@ -59,53 +59,6 @@ func (q *queries) GetBalance(ctx context.Context, ledgerID, account, asset strin
 	return &storage.BalanceResult{Input: input, Output: output}, nil
 }
 
-// GetAllBalances returns all asset balances for an account.
-func (q *queries) GetAllBalances(ctx context.Context, ledgerID, account string, asOfValid, asOfSystem *time.Time) (map[string]*storage.BalanceResult, error) {
-	query := `SELECT asset, COALESCE(SUM(input_delta), 0), COALESCE(SUM(output_delta), 0)
-		 FROM "_default".volumes_delta
-		 WHERE ledger_id = $1 AND account = $2`
-	args := []any{ledgerID, account}
-	argIdx := 3
-
-	if asOfValid != nil {
-		query += fmt.Sprintf(` AND valid_time <= $%d`, argIdx)
-		args = append(args, *asOfValid)
-		argIdx++
-	}
-	if asOfSystem != nil {
-		query += fmt.Sprintf(` AND system_time <= $%d`, argIdx)
-		args = append(args, *asOfSystem)
-	}
-	query += ` GROUP BY asset`
-
-	rows, err := q.db.Query(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("getting all balances: %w", err)
-	}
-	defer rows.Close()
-
-	result := make(map[string]*storage.BalanceResult)
-	for rows.Next() {
-		var asset, inputStr, outputStr string
-		if err := rows.Scan(&asset, &inputStr, &outputStr); err != nil {
-			return nil, err
-		}
-		input, err := parseBigInt(inputStr, "input_delta")
-		if err != nil {
-			return nil, err
-		}
-		output, err := parseBigInt(outputStr, "output_delta")
-		if err != nil {
-			return nil, err
-		}
-		result[asset] = &storage.BalanceResult{Input: input, Output: output}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating balances: %w", err)
-	}
-	return result, nil
-}
-
 // GetAggregatedBalances returns net balances (input - output) per asset across all
 // accounts matching the given address pattern. If addressPattern is empty, all accounts are included.
 func (q *queries) GetAggregatedBalances(ctx context.Context, ledgerID, addressPattern string, asOfValid, asOfSystem *time.Time) (map[string]*big.Int, error) {

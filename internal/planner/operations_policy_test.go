@@ -49,5 +49,5 @@ func TestWritePolicyDenialEvent_WritesAuditEvent(t *testing.T) {
 
 	require.NoError(t, p.WritePolicyDenialEvent(context.Background(), "L1", "alice", "denied by rule"))
 	require.Len(t, fs.events, 1)
-	assert.Equal(t, storage.EventTypePolicyUpdated, fs.events[0].Type)
+	assert.Equal(t, storage.EventTypePolicyDenied, fs.events[0].Type)
 }

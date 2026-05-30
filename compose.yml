@@ -28,7 +28,7 @@ services:
 
   server:
     build:
-      context: ../../
+      context: .
       dockerfile: Dockerfile
       target: server
     ports:
@@ -47,7 +47,7 @@ services:
 
   worker:
     build:
-      context: ../../
+      context: .
       dockerfile: Dockerfile
       target: worker
     environment:

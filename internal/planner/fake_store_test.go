@@ -38,26 +38,30 @@ type fakeStore struct {
 	accountRecords map[string]*storage.AccountRecord         // ledger|address
 	activePolicy   *storage.PolicyRecord                     // nil => unrestricted
 	approvals      map[string]*storage.PendingApprovalRecord // ledger|intentID
+
+	expireHoldFails  map[string]bool // ledger|holdID -> ExpireHold returns an error (poison row)
+	listExpiredCalls int             // number of ListExpiredHolds invocations
 }
 
 type balance struct{ input, output *big.Int }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		ledgers:        map[string]*storage.LedgerRecord{},
-		schemas:        map[string]*storage.SchemaRecord{},
-		seq:            map[string]int64{},
-		balances:       map[string]*balance{},
-		holds:          map[string]*big.Int{},
-		ikRecords:      map[string]*storage.IdempotencyKeyRecord{},
-		eventIDs:       map[string]bool{},
-		ikSeen:         map[string]bool{},
-		txByRef:        map[string]bool{},
-		accounts:       map[string]bool{},
-		holdRecords:    map[string]*storage.HoldRecord{},
-		txByID:         map[string]*storage.TransactionRecord{},
-		accountRecords: map[string]*storage.AccountRecord{},
-		approvals:      map[string]*storage.PendingApprovalRecord{},
+		ledgers:         map[string]*storage.LedgerRecord{},
+		schemas:         map[string]*storage.SchemaRecord{},
+		seq:             map[string]int64{},
+		balances:        map[string]*balance{},
+		holds:           map[string]*big.Int{},
+		ikRecords:       map[string]*storage.IdempotencyKeyRecord{},
+		eventIDs:        map[string]bool{},
+		ikSeen:          map[string]bool{},
+		txByRef:         map[string]bool{},
+		accounts:        map[string]bool{},
+		holdRecords:     map[string]*storage.HoldRecord{},
+		txByID:          map[string]*storage.TransactionRecord{},
+		accountRecords:  map[string]*storage.AccountRecord{},
+		approvals:       map[string]*storage.PendingApprovalRecord{},
+		expireHoldFails: map[string]bool{},
 	}
 }
 
@@ -224,6 +228,14 @@ func (t *fakeTx) GetActiveHoldsTotal(_ context.Context, ledgerID, account, asset
 
 func (t *fakeTx) AppendLogEvent(_ context.Context, e storage.LogEventRecord) error {
 	if e.IdempotencyKey != "" && t.parent.ikSeen[e.LedgerID+"|"+e.IdempotencyKey] {
+		// Model the concurrent winner: by the time our insert conflicts, the
+		// committed idempotency record exists for the key so a re-read finds it.
+		k := e.LedgerID + "|" + e.IdempotencyKey
+		if _, ok := t.parent.ikRecords[k]; !ok {
+			t.parent.ikRecords[k] = &storage.IdempotencyKeyRecord{
+				LedgerID: e.LedgerID, IdempotencyKey: e.IdempotencyKey, EventID: "concurrent-winner",
+			}
+		}
 		return storage.ErrIdempotencyKeyConflict
 	}
 	if t.parent.eventIDs[e.LedgerID+"|"+e.EventID] {
@@ -379,6 +391,33 @@ func (t *fakeTx) UpdateHoldCaptured(_ context.Context, ledgerID, holdID string, 
 			if cur := t.parent.holds[balKey(ledgerID, r.Source, r.Asset)]; cur != nil {
 				cur.Sub(cur, delta)
 			}
+		}
+	})
+	return nil
+}
+
+func (s *fakeStore) ListExpiredHolds(context.Context) ([]storage.HoldRecord, error) {
+	s.listExpiredCalls++
+	var out []storage.HoldRecord
+	for _, r := range s.holdRecords {
+		if r.Expired || r.Voided {
+			continue
+		}
+		out = append(out, *r)
+		if len(out) >= expiredHoldsBatchSize {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (t *fakeTx) ExpireHold(_ context.Context, ledgerID, holdID string) error {
+	if t.parent.expireHoldFails[ledgerID+"|"+holdID] {
+		return fmt.Errorf("poison hold %q cannot expire", holdID)
+	}
+	t.pending = append(t.pending, func() {
+		if r, ok := t.parent.holdRecords[ledgerID+"|"+holdID]; ok {
+			r.Expired = true
 		}
 	})
 	return nil

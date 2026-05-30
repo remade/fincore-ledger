@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/remade/ledger/internal/storage"
 )
 
 // SubmitAuthorize creates a hold (authorization) on a source account. The
@@ -51,12 +53,15 @@ func (p *Planner) SubmitAuthorize(ctx context.Context, ledgerID, source, destHin
 		if idempotencyKey != "" {
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
 		}
-		p.publishEvent(ctx, ledgerID, r.EventID, 2)
+		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeHoldCreated)
 		p.logger.Debug("hold authorized", zap.String("hold_id", r.HoldID), zap.String("source", source))
 		result = r
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil
@@ -100,11 +105,14 @@ func (p *Planner) SubmitCapture(ctx context.Context, ledgerID, holdID string, am
 		if idempotencyKey != "" {
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
 		}
-		p.publishEvent(ctx, ledgerID, r.EventID, 3)
+		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeHoldConfirmed)
 		result = r
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil
@@ -145,11 +153,14 @@ func (p *Planner) SubmitVoid(ctx context.Context, ledgerID, holdID string, idemp
 		if idempotencyKey != "" {
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
 		}
-		p.publishEvent(ctx, ledgerID, r.EventID, 4)
+		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeHoldVoided)
 		result = r
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil

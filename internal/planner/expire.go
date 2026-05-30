@@ -12,8 +12,12 @@ import (
 	"github.com/remade/ledger/internal/storage"
 )
 
+// expiredHoldsBatchSize is the page size ListExpiredHolds returns; the sweep
+// keeps looping while a full page comes back. Kept in sync with the store cap.
+const expiredHoldsBatchSize = 1000
+
 // ExpireHolds finds and expires all holds past their deadline.
-// Loops until all expired holds are processed (ListExpiredHolds caps at 1000).
+// Loops until all expired holds are processed (ListExpiredHolds caps the page).
 func (p *Planner) ExpireHolds(ctx context.Context) error {
 	totalExpired := 0
 	for {
@@ -25,22 +29,37 @@ func (p *Planner) ExpireHolds(ctx context.Context) error {
 			break
 		}
 
+		progressed := 0
 		for _, hold := range expired {
 			if err := p.expireSingleHold(ctx, hold); err != nil {
 				p.logger.Error("failed to expire hold",
 					zap.String("hold_id", hold.HoldID),
 					zap.Error(err),
 				)
+				continue
 			}
+			progressed++
 		}
 
-		totalExpired += len(expired)
+		totalExpired += progressed
 
-		// If fewer than the batch limit, we've processed all of them.
-		if len(expired) < 1000 {
+		// If no hold in this page could be expired, the remaining rows are
+		// failing (e.g. a poison hold) and ListExpiredHolds would return the same
+		// set every iteration, hot-spinning until the job timeout. Stop and let
+		// the next scheduled sweep retry them instead.
+		if progressed == 0 {
+			p.logger.Warn("hold expiry made no progress this pass; deferring to next sweep",
+				zap.Int("pending", len(expired)),
+			)
 			break
 		}
-		p.logger.Warn("more than 1000 expired holds found, processing next batch")
+
+		// If fewer than the batch limit, we've processed all of them.
+		if len(expired) < expiredHoldsBatchSize {
+			break
+		}
+		p.logger.Warn("full page of expired holds found, processing next batch",
+			zap.Int("batch_size", expiredHoldsBatchSize))
 	}
 
 	if totalExpired > 0 {
@@ -103,7 +122,7 @@ func (p *Planner) expireSingleHold(ctx context.Context, hold storage.HoldRecord)
 		return err
 	}
 
-	p.publishEvent(ctx, hold.LedgerID, eventID, 5)
+	p.publishEvent(ctx, hold.LedgerID, eventID, storage.EventTypeHoldExpired)
 
 	return nil
 }

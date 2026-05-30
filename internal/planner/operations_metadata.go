@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/remade/ledger/internal/storage"
 )
 
 // SubmitSetMetadata handles a SetMetadataOperation. The in-transaction core is
@@ -47,11 +49,14 @@ func (p *Planner) SubmitSetMetadata(ctx context.Context, ledgerID string, target
 		if idempotencyKey != "" {
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
 		}
-		p.publishEvent(ctx, ledgerID, r.EventID, 9)
+		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeMetadataSet)
 		result = r
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil
@@ -92,11 +97,14 @@ func (p *Planner) SubmitDeleteMetadata(ctx context.Context, ledgerID string, tar
 		if idempotencyKey != "" {
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
 		}
-		p.publishEvent(ctx, ledgerID, r.EventID, 10)
+		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeMetadataDeleted)
 		result = r
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil

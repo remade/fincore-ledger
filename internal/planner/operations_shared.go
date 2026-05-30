@@ -25,6 +25,27 @@ import (
 //   - leaves the L1/L2 idempotency *lookup* and post-commit cache/publish to the
 //     Submit* layer.
 
+// isIdempotencyConflict reports whether err is the concurrent same-key conflict
+// surfaced by AppendLogEvent/recordIdempotency when another writer committed the
+// same idempotency key first.
+func isIdempotencyConflict(err error) bool {
+	return errors.Is(err, storage.ErrIdempotencyKeyConflict)
+}
+
+// resolveIdempotencyConflict re-reads the idempotency record committed by the
+// concurrent winner and returns it as an idempotent hit, so a retried (already
+// applied) write succeeds instead of surfacing ErrIdempotencyKeyConflict. The
+// caller must roll back its own (now-aborted) transaction before calling this.
+// If the record cannot be read, the original conflict error is returned so the
+// caller does not report a phantom success.
+func (p *Planner) resolveIdempotencyConflict(ctx context.Context, ledgerID, idempotencyKey string) (*SubmitResult, error) {
+	ikRecord, err := p.store.GetIdempotencyKey(ctx, ledgerID, idempotencyKey)
+	if err != nil || ikRecord == nil {
+		return nil, storage.ErrIdempotencyKeyConflict
+	}
+	return &SubmitResult{EventID: ikRecord.EventID, IdempotentHit: true}, nil
+}
+
 // validatePostings checks the structural validity of a set of postings.
 func validatePostings(postings []PostingInput) error {
 	if len(postings) == 0 {

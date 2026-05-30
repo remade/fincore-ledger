@@ -91,12 +91,15 @@ func (p *Planner) SubmitInsertSchema(ctx context.Context, ledgerID string, schem
 			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, eventID, ikHash)
 		}
 
-		p.publishEvent(ctx, ledgerID, eventID, 11)
+		p.publishEvent(ctx, ledgerID, eventID, storage.EventTypeSchemaInserted)
 
 		result = &SubmitResult{EventID: eventID}
 		return nil
 	})
 	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
 		return nil, err
 	}
 	return result, nil
