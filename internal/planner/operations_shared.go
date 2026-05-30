@@ -1,0 +1,252 @@
+package planner
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math/big"
+	"time"
+
+	"github.com/oklog/ulid/v2"
+
+	"github.com/remade/ledger/internal/ir"
+	"github.com/remade/ledger/internal/storage"
+	"github.com/remade/ledger/pkg/accounts"
+	"github.com/remade/ledger/pkg/assets"
+)
+
+// This file holds the shared in-transaction cores (do*InTx) used by both the
+// standalone Submit* methods and the batch execute*InTx methods. Each do*InTx:
+//   - runs ALL input/schema/business validation, so the batch path gets the same
+//     defensive checks the standalone path always had (closing the prior gap);
+//   - operates on a caller-supplied open transaction (never BeginTx/Commit/Rollback
+//     itself — no nested transactions);
+//   - leaves the L1/L2 idempotency *lookup* and post-commit cache/publish to the
+//     Submit* layer.
+
+// validatePostings checks the structural validity of a set of postings.
+func validatePostings(postings []PostingInput) error {
+	if len(postings) == 0 {
+		return fmt.Errorf("at least one posting is required")
+	}
+	for i, posting := range postings {
+		if err := accounts.Validate(posting.Source); err != nil {
+			return fmt.Errorf("posting %d source: %w", i, err)
+		}
+		if err := accounts.Validate(posting.Destination); err != nil {
+			return fmt.Errorf("posting %d destination: %w", i, err)
+		}
+		if err := assets.Validate(posting.Asset); err != nil {
+			return fmt.Errorf("posting %d asset: %w", i, err)
+		}
+		if posting.Amount == nil || posting.Amount.Sign() <= 0 {
+			return fmt.Errorf("posting %d: amount must be positive", i)
+		}
+	}
+	return nil
+}
+
+// doPostInTx is the shared core of a post operation. It validates, enforces the
+// chart-of-accounts schema, checks balances (TOCTOU-safe inside the tx), and
+// writes the event + transaction + volume deltas + accounts. It records the
+// idempotency key only when ikHash is non-nil (the standalone path supplies it;
+// the batch path passes nil and manages idempotency at the event level only).
+// On dryRun it returns after balance checks without writing; the caller rolls
+// back. The ErrIdempotencyKeyConflict from AppendLogEvent is propagated for the
+// caller to interpret.
+func (p *Planner) doPostInTx(ctx context.Context, txStore storage.TxStore, ledger *storage.LedgerRecord, postings []PostingInput, reference string, metadata map[string]any, idempotencyKey string, ikHash []byte, vt, now time.Time, dryRun bool) (*SubmitResult, error) {
+	if err := validatePostings(postings); err != nil {
+		return nil, err
+	}
+
+	// Schema enforcement against the active chart of accounts.
+	if mode := ir.SchemaEnforcementMode(ledger.Features["schema_enforcement"]); mode == ir.SchemaStrict || mode == ir.SchemaBestEffort {
+		if err := p.validatePostingsAgainstSchema(ctx, ledger.ID, ledger.Features["active_schema_version"], postings, mode); err != nil {
+			return nil, err
+		}
+	}
+
+	// Compute net outputs/inputs per (account, asset).
+	type acctAsset struct{ Account, Asset string }
+	netOutputs := make(map[acctAsset]*big.Int)
+	netInputs := make(map[acctAsset]*big.Int)
+	for _, posting := range postings {
+		if posting.Amount.Sign() == 0 {
+			continue
+		}
+		srcKey := acctAsset{posting.Source, posting.Asset}
+		if netOutputs[srcKey] == nil {
+			netOutputs[srcKey] = new(big.Int)
+		}
+		netOutputs[srcKey].Add(netOutputs[srcKey], posting.Amount)
+
+		dstKey := acctAsset{posting.Destination, posting.Asset}
+		if netInputs[dstKey] == nil {
+			netInputs[dstKey] = new(big.Int)
+		}
+		netInputs[dstKey].Add(netInputs[dstKey], posting.Amount)
+	}
+
+	// Balance checks for non-issuer source accounts (inside the tx, no TOCTOU).
+	for key, output := range netOutputs {
+		if accounts.IsIssuer(key.Account, ledger.IssuerAccounts) {
+			continue
+		}
+		bal, err := txStore.GetBalance(ctx, ledger.ID, key.Account, key.Asset, nil, nil)
+		if err != nil {
+			return nil, fmt.Errorf("getting balance for %s/%s: %w", key.Account, key.Asset, err)
+		}
+		currentBalance := new(big.Int).Sub(bal.Input, bal.Output)
+		activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledger.ID, key.Account, key.Asset)
+		if err != nil {
+			return nil, fmt.Errorf("getting active holds for %s/%s: %w", key.Account, key.Asset, err)
+		}
+		currentBalance.Sub(currentBalance, activeHolds)
+		if netIn, ok := netInputs[key]; ok {
+			currentBalance.Add(currentBalance, netIn)
+		}
+		if new(big.Int).Sub(currentBalance, output).Sign() < 0 {
+			return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, key.Account, key.Asset)
+		}
+	}
+
+	// Dry-run stops here, before any writes; the caller rolls the tx back.
+	if dryRun {
+		return &SubmitResult{EventID: "dry-run"}, nil
+	}
+
+	eventID := ulid.Make().String()
+	txID := ulid.Make().String()
+	batchID, err := p.batch.CurrentBatchID(ctx, ledger.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting batch ID: %w", err)
+	}
+	seq, err := txStore.NextLedgerSeq(ctx, ledger.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting next seq: %w", err)
+	}
+
+	postingRecords := make([]map[string]any, len(postings))
+	for i, pp := range postings {
+		postingRecords[i] = map[string]any{
+			"source":      pp.Source,
+			"destination": pp.Destination,
+			"amount":      pp.Amount.String(),
+			"asset":       pp.Asset,
+		}
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"transaction_id": txID,
+		"postings":       postingRecords,
+		"metadata":       metadata,
+		"reference":      reference,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling event payload: %w", err)
+	}
+
+	logEvent := storage.LogEventRecord{
+		EventID:        eventID,
+		LedgerID:       ledger.ID,
+		LedgerSeq:      seq,
+		SystemTime:     now,
+		ValidTime:      vt,
+		Type:           storage.EventTypeTransactionPosted,
+		Payload:        payload,
+		IdempotencyKey: idempotencyKey,
+		BatchID:        batchID,
+		SchemaVersion:  1,
+	}
+	if idempotencyKey != "" && ikHash != nil {
+		logEvent.IdempotencyHash = ikHash
+	}
+	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+		return nil, err
+	}
+
+	txRec := storage.TransactionRecord{
+		LedgerID:      ledger.ID,
+		TransactionID: txID,
+		EventID:       eventID,
+		ValidTime:     vt,
+		SystemTime:    now,
+		Reference:     reference,
+		Postings:      postingRecords,
+		Metadata:      metadata,
+	}
+	if err := txStore.InsertTransaction(ctx, txRec); err != nil {
+		if errors.Is(err, storage.ErrTransactionReferenceConflict) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("inserting transaction: %w", err)
+	}
+
+	if len(metadata) > 0 {
+		if err := txStore.InsertMetadataHistory(ctx, storage.MetadataHistoryRecord{
+			LedgerID:   ledger.ID,
+			TargetType: storage.TargetTypeTransaction,
+			TargetID:   txID,
+			Revision:   0,
+			Metadata:   metadata,
+			EventID:    eventID,
+			SystemTime: now,
+		}); err != nil {
+			return nil, fmt.Errorf("inserting initial metadata history: %w", err)
+		}
+	}
+
+	touchedAccounts := make(map[string]bool)
+	for _, posting := range postings {
+		if posting.Amount.Sign() == 0 {
+			continue
+		}
+		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+			LedgerID:    ledger.ID,
+			Account:     posting.Source,
+			Asset:       posting.Asset,
+			EventID:     eventID,
+			ValidTime:   vt,
+			SystemTime:  now,
+			InputDelta:  big.NewInt(0),
+			OutputDelta: posting.Amount,
+		}); err != nil {
+			return nil, fmt.Errorf("inserting source volume delta: %w", err)
+		}
+		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
+			LedgerID:    ledger.ID,
+			Account:     posting.Destination,
+			Asset:       posting.Asset,
+			EventID:     eventID,
+			ValidTime:   vt,
+			SystemTime:  now,
+			InputDelta:  posting.Amount,
+			OutputDelta: big.NewInt(0),
+		}); err != nil {
+			return nil, fmt.Errorf("inserting dest volume delta: %w", err)
+		}
+		touchedAccounts[posting.Source] = true
+		touchedAccounts[posting.Destination] = true
+	}
+
+	for addr := range touchedAccounts {
+		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
+			LedgerID:   ledger.ID,
+			Address:    addr,
+			FirstUsage: now,
+			UpdatedAt:  now,
+			Metadata:   map[string]any{},
+		}); err != nil {
+			return nil, fmt.Errorf("upserting account %s: %w", addr, err)
+		}
+	}
+
+	if idempotencyKey != "" && ikHash != nil {
+		if err := p.recordIdempotency(ctx, txStore, ledger.ID, idempotencyKey, eventID, ikHash); err != nil {
+			return nil, err
+		}
+	}
+
+	return &SubmitResult{EventID: eventID, Transaction: &txRec}, nil
+}

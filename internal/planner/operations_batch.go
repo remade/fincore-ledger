@@ -175,135 +175,17 @@ func (p *Planner) executeIntentInTx(ctx context.Context, txStore storage.TxStore
 	}
 }
 
+// executePostInTx runs a post intent against the batch's open transaction. It
+// reuses the same shared core (doPostInTx) as SubmitPost, so the batch path now
+// performs the input + schema validation it previously skipped. Idempotency is
+// recorded at the event level only (ikHash nil), matching prior batch behavior.
 func (p *Planner) executePostInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
-	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-	txID := ulid.Make().String()
-
 	ledger, err := txStore.GetLedger(ctx, ledgerID)
 	if err != nil {
 		return nil, err
 	}
-
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Check balances.
-	type acctAsset struct{ Account, Asset string }
-	netOutputs := make(map[acctAsset]*big.Int)
-	netInputs := make(map[acctAsset]*big.Int)
-	for _, posting := range intent.Postings {
-		if posting.Amount.Sign() == 0 {
-			continue
-		}
-		srcKey := acctAsset{posting.Source, posting.Asset}
-		if netOutputs[srcKey] == nil {
-			netOutputs[srcKey] = new(big.Int)
-		}
-		netOutputs[srcKey].Add(netOutputs[srcKey], posting.Amount)
-
-		dstKey := acctAsset{posting.Destination, posting.Asset}
-		if netInputs[dstKey] == nil {
-			netInputs[dstKey] = new(big.Int)
-		}
-		netInputs[dstKey].Add(netInputs[dstKey], posting.Amount)
-	}
-
-	for key, output := range netOutputs {
-		if accounts.IsIssuer(key.Account, ledger.IssuerAccounts) {
-			continue
-		}
-		bal, err := txStore.GetBalance(ctx, ledgerID, key.Account, key.Asset, nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		currentBalance := new(big.Int).Sub(bal.Input, bal.Output)
-		activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, key.Account, key.Asset)
-		if err != nil {
-			return nil, err
-		}
-		currentBalance.Sub(currentBalance, activeHolds)
-		if netIn, ok := netInputs[key]; ok {
-			currentBalance.Add(currentBalance, netIn)
-		}
-		if new(big.Int).Sub(currentBalance, output).Sign() < 0 {
-			return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, key.Account, key.Asset)
-		}
-	}
-
-	postingRecords := make([]map[string]any, len(intent.Postings))
-	for i, p := range intent.Postings {
-		postingRecords[i] = map[string]any{
-			"source": p.Source, "destination": p.Destination,
-			"amount": p.Amount.String(), "asset": p.Asset,
-		}
-	}
-
-	payload, err := json.Marshal(map[string]any{
-		"transaction_id": txID, "postings": postingRecords,
-		"metadata": intent.Metadata, "reference": intent.Reference,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling payload: %w", err)
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeTransactionPosted,
-		Payload: payload, IdempotencyKey: intent.IdempotencyKey,
-		BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.InsertTransaction(ctx, storage.TransactionRecord{
-		LedgerID: ledgerID, TransactionID: txID, EventID: eventID,
-		ValidTime: now, SystemTime: now, Reference: intent.Reference,
-		Postings: postingRecords, Metadata: intent.Metadata,
-	}); err != nil {
-		return nil, err
-	}
-
-	touchedAccounts := make(map[string]bool)
-	for _, posting := range intent.Postings {
-		if posting.Amount.Sign() == 0 {
-			continue
-		}
-		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-			LedgerID: ledgerID, Account: posting.Source, Asset: posting.Asset,
-			EventID: eventID, ValidTime: now, SystemTime: now,
-			InputDelta: big.NewInt(0), OutputDelta: posting.Amount,
-		}); err != nil {
-			return nil, err
-		}
-		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-			LedgerID: ledgerID, Account: posting.Destination, Asset: posting.Asset,
-			EventID: eventID, ValidTime: now, SystemTime: now,
-			InputDelta: posting.Amount, OutputDelta: big.NewInt(0),
-		}); err != nil {
-			return nil, err
-		}
-		touchedAccounts[posting.Source] = true
-		touchedAccounts[posting.Destination] = true
-	}
-
-	for addr := range touchedAccounts {
-		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
-			LedgerID: ledgerID, Address: addr, FirstUsage: now, UpdatedAt: now,
-			Metadata: map[string]any{},
-		}); err != nil {
-			return nil, err
-		}
-	}
-
-	return &SubmitResult{EventID: eventID}, nil
+	now := time.Now().UTC()
+	return p.doPostInTx(ctx, txStore, ledger, intent.Postings, intent.Reference, intent.Metadata, intent.IdempotencyKey, nil, now, now, false)
 }
 
 func (p *Planner) executeSetMetadataInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
