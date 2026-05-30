@@ -52,6 +52,43 @@ func (q *queries) GetLogEvent(ctx context.Context, ledgerID, eventID string) (*s
 	return &rec, nil
 }
 
+// ListLogEventsByIdempotencyKey returns events written under the given
+// idempotency key for a ledger. An empty key matches nothing (events without a
+// key are stored as NULL). Backed by the UNIQUE (ledger_id, idempotency_key)
+// index, so this is an indexed lookup.
+func (q *queries) ListLogEventsByIdempotencyKey(ctx context.Context, ledgerID, idempotencyKey string) ([]storage.LogEventRecord, error) {
+	if idempotencyKey == "" {
+		return nil, nil
+	}
+	rows, err := q.db.Query(ctx,
+		`SELECT event_id, ledger_id, ledger_seq, system_time, valid_time, type, payload,
+		        COALESCE(idempotency_key, ''), idempotency_hash, batch_id, schema_version
+		 FROM "_default".log_events
+		 WHERE ledger_id = $1 AND idempotency_key = $2
+		 ORDER BY ledger_seq`,
+		ledgerID, idempotencyKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing log events by idempotency key: %w", err)
+	}
+	defer rows.Close()
+
+	var result []storage.LogEventRecord
+	for rows.Next() {
+		var rec storage.LogEventRecord
+		if err := rows.Scan(&rec.EventID, &rec.LedgerID, &rec.LedgerSeq, &rec.SystemTime,
+			&rec.ValidTime, &rec.Type, &rec.Payload,
+			&rec.IdempotencyKey, &rec.IdempotencyHash, &rec.BatchID, &rec.SchemaVersion); err != nil {
+			return nil, fmt.Errorf("scanning log event: %w", err)
+		}
+		result = append(result, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating log events by idempotency key: %w", err)
+	}
+	return result, nil
+}
+
 func (q *queries) ListLogEvents(ctx context.Context, ledgerID string, params storage.ListParams) ([]storage.LogEventRecord, string, error) {
 	if params.PageSize <= 0 {
 		params.PageSize = 100

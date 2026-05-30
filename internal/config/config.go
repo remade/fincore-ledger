@@ -51,6 +51,9 @@ type WorkerConfig struct {
 	CheckpointInterval     time.Duration
 	HoldExpiryInterval     time.Duration
 	ApprovalExpiryInterval time.Duration
+	// StuckApprovalThreshold is how long an approval may remain in the
+	// "executing" state before the expiry sweep treats it as stuck and recovers it.
+	StuckApprovalThreshold time.Duration
 }
 
 // AuthConfig configures gRPC authentication. When Enabled, every non-exempt
@@ -79,6 +82,7 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.Duration("worker-checkpoint-interval", 0, "Checkpoint build interval")
 	fs.Duration("worker-hold-expiry-interval", 0, "Hold expiry sweep interval")
 	fs.Duration("worker-approval-expiry-interval", 0, "Approval expiry interval")
+	fs.Duration("worker-stuck-approval-threshold", 0, "How long an approval may stay executing before recovery")
 	fs.Bool("auth-enabled", false, "Require authenticated requests (JWT bearer tokens)")
 	fs.String("auth-method", "", "Authentication method (jwt)")
 	fs.String("auth-jwks-url", "", "JWKS URL used to verify JWT signatures")
@@ -108,6 +112,7 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 	v.SetDefault("worker.checkpoint_interval", 30*time.Second)
 	v.SetDefault("worker.hold_expiry_interval", 30*time.Second)
 	v.SetDefault("worker.approval_expiry_interval", 60*time.Second)
+	v.SetDefault("worker.stuck_approval_threshold", 5*time.Minute)
 	v.SetDefault("auth.enabled", false)
 	v.SetDefault("auth.method", "jwt")
 	v.SetDefault("auth.jwks_url", "")
@@ -148,6 +153,7 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 		bindFlag(v, fs, "worker-checkpoint-interval", "worker.checkpoint_interval")
 		bindFlag(v, fs, "worker-hold-expiry-interval", "worker.hold_expiry_interval")
 		bindFlag(v, fs, "worker-approval-expiry-interval", "worker.approval_expiry_interval")
+		bindFlag(v, fs, "worker-stuck-approval-threshold", "worker.stuck_approval_threshold")
 		bindFlag(v, fs, "auth-enabled", "auth.enabled")
 		bindFlag(v, fs, "auth-method", "auth.method")
 		bindFlag(v, fs, "auth-jwks-url", "auth.jwks_url")
@@ -178,6 +184,7 @@ func New(fs *pflag.FlagSet) (*Config, error) {
 			CheckpointInterval:     v.GetDuration("worker.checkpoint_interval"),
 			HoldExpiryInterval:     v.GetDuration("worker.hold_expiry_interval"),
 			ApprovalExpiryInterval: v.GetDuration("worker.approval_expiry_interval"),
+			StuckApprovalThreshold: v.GetDuration("worker.stuck_approval_threshold"),
 		},
 		Auth: AuthConfig{
 			Enabled:  v.GetBool("auth.enabled"),
@@ -229,6 +236,9 @@ func (c *Config) validate() error {
 	}
 	if c.Worker.ApprovalExpiryInterval <= 0 {
 		return fmt.Errorf("config: worker.approval_expiry_interval must be positive, got %v", c.Worker.ApprovalExpiryInterval)
+	}
+	if c.Worker.StuckApprovalThreshold <= 0 {
+		return fmt.Errorf("config: worker.stuck_approval_threshold must be positive, got %v", c.Worker.StuckApprovalThreshold)
 	}
 	if c.Environment != "development" && strings.Contains(c.Postgres.DSN, "sslmode=disable") {
 		return fmt.Errorf("config: postgres.dsn uses sslmode=disable in %s environment; use sslmode=require or sslmode=verify-full", c.Environment)

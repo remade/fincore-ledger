@@ -169,12 +169,38 @@ func (q *queries) UpdateApprovalState(ctx context.Context, ledgerID, intentID, s
 	return err
 }
 
+func (q *queries) MarkApprovalExecuting(ctx context.Context, ledgerID, intentID string) error {
+	_, err := q.db.Exec(ctx,
+		`UPDATE "_default".pending_approvals
+		 SET state = 'executing', executing_at = now()
+		 WHERE ledger_id = $1 AND intent_id = $2`,
+		ledgerID, intentID,
+	)
+	return err
+}
+
+// UpdateApprovalStateIf transitions the approval only if it is still in
+// fromState. It returns true when a row was updated; false means another writer
+// (e.g. a concurrently-completing Approve) already moved it, so the caller must
+// not clobber that result.
+func (q *queries) UpdateApprovalStateIf(ctx context.Context, ledgerID, intentID, fromState, toState string) (bool, error) {
+	tag, err := q.db.Exec(ctx,
+		`UPDATE "_default".pending_approvals SET state = $4
+		 WHERE ledger_id = $1 AND intent_id = $2 AND state = $3`,
+		ledgerID, intentID, fromState, toState,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (q *queries) ListStuckApprovals(ctx context.Context, stuckThreshold time.Duration) ([]storage.PendingApprovalRecord, error) {
 	rows, err := q.db.Query(ctx,
 		`SELECT ledger_id, intent_id, intent_payload, intent_hash, required_approvers,
 		        received_approvals, expires_at, state, submitted_at, submitted_by
 		 FROM "_default".pending_approvals
-		 WHERE state = 'executing' AND submitted_at < now() - $1::interval
+		 WHERE state = 'executing' AND COALESCE(executing_at, submitted_at) < now() - $1::interval
 		 LIMIT 1000`,
 		stuckThreshold.String(),
 	)

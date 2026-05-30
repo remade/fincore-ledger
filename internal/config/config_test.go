@@ -46,6 +46,9 @@ func TestNew_Defaults(t *testing.T) {
 	if cfg.Worker.BatchCloseInterval != 5*time.Second {
 		t.Errorf("batch close interval = %v, want 5s", cfg.Worker.BatchCloseInterval)
 	}
+	if cfg.Worker.StuckApprovalThreshold != 5*time.Minute {
+		t.Errorf("stuck approval threshold = %v, want 5m", cfg.Worker.StuckApprovalThreshold)
+	}
 }
 
 func TestNew_EnvVarsOverrideDefaults(t *testing.T) {
@@ -164,6 +167,11 @@ func TestNew_ValidationErrors(t *testing.T) {
 			envVars: map[string]string{"LEDGER_AUTH_ENABLED": "true", "LEDGER_AUTH_METHOD": "mtls", "LEDGER_AUTH_JWKS_URL": "https://x/jwks"},
 			wantErr: `auth.method must be "jwt"`,
 		},
+		{
+			name:    "stuck approval threshold must be positive",
+			envVars: map[string]string{"LEDGER_WORKER_STUCK_APPROVAL_THRESHOLD": "0s"},
+			wantErr: "stuck_approval_threshold must be positive",
+		},
 	}
 
 	for _, tt := range tests {
@@ -207,6 +215,7 @@ func TestNew_EmptyRequiredValueViaFlag(t *testing.T) {
 func TestNew_WorkerIntervalFromEnv(t *testing.T) {
 	t.Setenv("LEDGER_WORKER_BATCH_CLOSE_INTERVAL", "10s")
 	t.Setenv("LEDGER_WORKER_CHECKPOINT_INTERVAL", "1m")
+	t.Setenv("LEDGER_WORKER_STUCK_APPROVAL_THRESHOLD", "2m")
 
 	cfg, err := New(nil)
 	if err != nil {
@@ -218,6 +227,9 @@ func TestNew_WorkerIntervalFromEnv(t *testing.T) {
 	}
 	if cfg.Worker.CheckpointInterval != time.Minute {
 		t.Errorf("checkpoint interval = %v, want 1m", cfg.Worker.CheckpointInterval)
+	}
+	if cfg.Worker.StuckApprovalThreshold != 2*time.Minute {
+		t.Errorf("stuck approval threshold = %v, want 2m", cfg.Worker.StuckApprovalThreshold)
 	}
 }
 

@@ -136,9 +136,9 @@ func (p *Planner) Approve(ctx context.Context, ledgerID, intentID, principal, si
 		return &SubmitResult{EventID: intentID}, nil // partial, still pending
 	}
 
-	// All approved -- mark as "executing" to prevent double-execution on crash recovery,
-	// then commit and execute the intent.
-	if err := txStore.UpdateApprovalState(ctx, ledgerID, intentID, "executing"); err != nil {
+	// All approved -- mark as "executing" (recording executing_at) to prevent
+	// double-execution on crash recovery, then commit and execute the intent.
+	if err := txStore.MarkApprovalExecuting(ctx, ledgerID, intentID); err != nil {
 		return nil, err
 	}
 
@@ -146,7 +146,10 @@ func (p *Planner) Approve(ctx context.Context, ledgerID, intentID, principal, si
 		return nil, err
 	}
 
-	// Deserialize and execute the approved intent.
+	// Deserialize and execute the approved intent. Execution uses a deterministic
+	// idempotency key (see approvalExecutionKey) so the committed financial event
+	// carries it; a later recovery sweep can then tell whether the intent already
+	// executed without re-running it.
 	var intent BatchIntent
 	if err := json.Unmarshal(approval.IntentPayload, &intent); err != nil {
 		if stateErr := p.store.UpdateApprovalState(ctx, ledgerID, intentID, "rejected"); stateErr != nil {
@@ -155,6 +158,7 @@ func (p *Planner) Approve(ctx context.Context, ledgerID, intentID, principal, si
 		}
 		return nil, fmt.Errorf("deserializing approved intent: %w", err)
 	}
+	intent.IdempotencyKey = approvalExecutionKey(intentID)
 
 	result, err := p.executeIntent(ctx, ledgerID, intent)
 	if err != nil {
@@ -205,8 +209,14 @@ func (p *Planner) Approve(ctx context.Context, ledgerID, intentID, principal, si
 		}
 	}
 
-	if err := p.store.UpdateApprovalState(ctx, ledgerID, intentID, "executed"); err != nil {
+	// Guarded transition (executing -> executed): if a recovery sweep already
+	// resolved this row, do not overwrite it. Makes the no-clobber invariant
+	// local rather than relying on whole-flow reasoning.
+	if updated, err := p.store.UpdateApprovalStateIf(ctx, ledgerID, intentID, "executing", "executed"); err != nil {
 		p.logger.Error("failed to mark approval as executed", zap.String("intent_id", intentID), zap.Error(err))
+	} else if !updated {
+		p.logger.Info("approval already resolved before final state write; not overwriting",
+			zap.String("intent_id", intentID))
 	}
 
 	p.logger.Info("approval completed, intent executed",
@@ -217,9 +227,29 @@ func (p *Planner) Approve(ctx context.Context, ledgerID, intentID, principal, si
 	return result, nil
 }
 
-// ExpireStaleApprovals transitions pending approvals past their deadline to expired,
-// and recovers approvals stuck in "executing" state past the stuck threshold.
-func (p *Planner) ExpireStaleApprovals(ctx context.Context) error {
+// approvalExecutionKey returns the idempotency key used to execute an approved
+// intent. It is derived solely from the server-generated intent ID (a ULID), so
+// it is unique to this approval and cannot collide with an unrelated event. A
+// client-supplied key inside the intent payload is deliberately NOT used: doing
+// so would let a caller point recovery at an unrelated event (and let the
+// Submit* idempotency short-circuit skip the real effect). Because this key is
+// recorded on the committed event, recovery can detect execution unambiguously.
+func approvalExecutionKey(intentID string) string {
+	return "approval:" + intentID
+}
+
+// ExpireStaleApprovals transitions pending approvals past their deadline to
+// expired, and recovers approvals stuck in the "executing" state for longer than
+// stuckThreshold.
+//
+// A stuck approval means the process committed "executing" but crashed before
+// recording a terminal state. Recovery is crash-safe: it checks whether the
+// intent's execution actually committed (via the deterministic idempotency key
+// recorded on the event) rather than re-executing. If events exist the intent
+// truly ran, so the approval is marked "executed"; otherwise it never ran and is
+// safely marked "expired". This avoids both double-execution and wrongly
+// expiring approvals whose financial effects are already real.
+func (p *Planner) ExpireStaleApprovals(ctx context.Context, stuckThreshold time.Duration) error {
 	expired, err := p.store.ListExpiredApprovals(ctx)
 	if err != nil {
 		return err
@@ -233,24 +263,58 @@ func (p *Planner) ExpireStaleApprovals(ctx context.Context) error {
 		p.logger.Info("expired stale approvals", zap.Int("count", len(expired)))
 	}
 
-	// Recover approvals stuck in "executing" state for more than 5 minutes.
-	// This handles cases where the process crashed or the state update failed
-	// after intent execution completed.
-	stuck, err := p.store.ListStuckApprovals(ctx, 5*time.Minute)
+	stuck, err := p.store.ListStuckApprovals(ctx, stuckThreshold)
 	if err != nil {
 		return err
 	}
+	var completed, abandoned int
 	for _, a := range stuck {
-		p.logger.Error("recovering stuck approval -- transitioning from executing to expired",
+		key := approvalExecutionKey(a.IntentID)
+		events, err := p.store.ListLogEventsByIdempotencyKey(ctx, a.LedgerID, key)
+		if err != nil {
+			// Cannot determine execution status; leave "executing" for the next
+			// sweep rather than risk a wrong terminal transition.
+			p.logger.Error("failed to check stuck approval execution status; leaving for next sweep",
+				zap.String("intent_id", a.IntentID), zap.Error(err))
+			continue
+		}
+
+		nextState := "expired"
+		if len(events) > 0 {
+			nextState = "executed"
+		}
+		// Guarded transition: only resolve a row that is still "executing", so a
+		// concurrently-completing Approve that already wrote a terminal state is
+		// never clobbered (e.g. recovery does not flip a real "executed" back to
+		// "expired" while execution commits in a different process).
+		updated, err := p.store.UpdateApprovalStateIf(ctx, a.LedgerID, a.IntentID, "executing", nextState)
+		if err != nil {
+			p.logger.Error("failed to update stuck approval state",
+				zap.String("intent_id", a.IntentID), zap.String("state", nextState), zap.Error(err))
+			continue
+		}
+		if !updated {
+			p.logger.Info("stuck approval already resolved by the live path; skipping",
+				zap.String("intent_id", a.IntentID))
+			continue
+		}
+		if nextState == "executed" {
+			completed++
+		} else {
+			abandoned++
+		}
+		p.logger.Warn("recovered stuck approval",
 			zap.String("intent_id", a.IntentID),
 			zap.String("ledger_id", a.LedgerID),
+			zap.String("resolved_state", nextState),
+			zap.Bool("executed", len(events) > 0),
 		)
-		if err := p.store.UpdateApprovalState(ctx, a.LedgerID, a.IntentID, "expired"); err != nil {
-			p.logger.Error("failed to recover stuck approval", zap.String("intent_id", a.IntentID), zap.Error(err))
-		}
 	}
-	if len(stuck) > 0 {
-		p.logger.Warn("recovered stuck approvals", zap.Int("count", len(stuck)))
+	if completed+abandoned > 0 {
+		p.logger.Warn("recovered stuck approvals",
+			zap.Int("completed_as_executed", completed),
+			zap.Int("expired_unexecuted", abandoned),
+		)
 	}
 
 	return nil

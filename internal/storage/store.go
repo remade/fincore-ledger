@@ -23,6 +23,10 @@ type Store interface {
 	AppendLogEvent(ctx context.Context, event LogEventRecord) error
 	GetLogEvent(ctx context.Context, ledgerID, eventID string) (*LogEventRecord, error)
 	ListLogEvents(ctx context.Context, ledgerID string, params ListParams) ([]LogEventRecord, string, error)
+	// ListLogEventsByIdempotencyKey returns events written under the given
+	// idempotency key (empty key matches nothing). Used by approval crash
+	// recovery to determine whether an intent already executed.
+	ListLogEventsByIdempotencyKey(ctx context.Context, ledgerID, idempotencyKey string) ([]LogEventRecord, error)
 
 	// Batches
 	CreateBatch(ctx context.Context, batch BatchRecord) error
@@ -82,6 +86,13 @@ type Store interface {
 	GetPendingApproval(ctx context.Context, ledgerID, intentID string) (*PendingApprovalRecord, error)
 	AddApproval(ctx context.Context, ledgerID, intentID, principal, signature string) error
 	UpdateApprovalState(ctx context.Context, ledgerID, intentID, state string) error
+	// MarkApprovalExecuting transitions an approval to "executing" and records
+	// executing_at = now(), so stuck detection measures execution duration.
+	MarkApprovalExecuting(ctx context.Context, ledgerID, intentID string) error
+	// UpdateApprovalStateIf transitions an approval only when it is currently in
+	// fromState, returning whether a row was updated. Recovery uses it so a
+	// concurrently-completing approval is never clobbered.
+	UpdateApprovalStateIf(ctx context.Context, ledgerID, intentID, fromState, toState string) (bool, error)
 	ListPendingApprovals(ctx context.Context, ledgerID string, params ListParams) ([]PendingApprovalRecord, string, error)
 	ListExpiredApprovals(ctx context.Context) ([]PendingApprovalRecord, error)
 	ListStuckApprovals(ctx context.Context, stuckThreshold time.Duration) ([]PendingApprovalRecord, error)
@@ -112,14 +123,14 @@ type ListParams struct {
 }
 
 type LedgerRecord struct {
-	ID              string
-	BucketID        string
-	State           string
-	Features        map[string]string
-	Metadata        map[string]string
-	CreatedAt       time.Time
-	SealedAt        *time.Time
-	IssuerAccounts  []string
+	ID             string
+	BucketID       string
+	State          string
+	Features       map[string]string
+	Metadata       map[string]string
+	CreatedAt      time.Time
+	SealedAt       *time.Time
+	IssuerAccounts []string
 }
 
 type LogEventRecord struct {
@@ -268,16 +279,16 @@ type PolicyRecord struct {
 }
 
 type PendingApprovalRecord struct {
-	LedgerID           string
-	IntentID           string
-	IntentPayload      []byte
-	IntentHash         []byte
-	RequiredApprovers  []string
-	ReceivedApprovals  []ApprovalEntry
-	ExpiresAt          time.Time
-	State              string
-	SubmittedAt        time.Time
-	SubmittedBy        string
+	LedgerID          string
+	IntentID          string
+	IntentPayload     []byte
+	IntentHash        []byte
+	RequiredApprovers []string
+	ReceivedApprovals []ApprovalEntry
+	ExpiresAt         time.Time
+	State             string
+	SubmittedAt       time.Time
+	SubmittedBy       string
 }
 
 type ApprovalEntry struct {

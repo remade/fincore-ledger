@@ -71,6 +71,7 @@ func (db *DB) MigrateUp(ctx context.Context) error {
 		"001_init.up.sql",
 		"010_holds.up.sql",
 		"020_governance.up.sql",
+		"030_approval_executing_at.up.sql",
 	}
 
 	for _, file := range upFiles {
@@ -122,6 +123,7 @@ func (db *DB) MigrateUp(ctx context.Context) error {
 // MigrateDown reverses all migrations in descending order.
 func (db *DB) MigrateDown(ctx context.Context) error {
 	downFiles := []string{
+		"030_approval_executing_at.down.sql",
 		"020_governance.down.sql",
 		"010_holds.down.sql",
 		"001_init.down.sql",

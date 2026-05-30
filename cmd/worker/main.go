@@ -58,6 +58,7 @@ func startWorker(lc fx.Lifecycle, p *planner.Planner, bm *batch.Manager, cb *vol
 				zap.Duration("checkpoint_interval", cfg.CheckpointInterval),
 				zap.Duration("hold_expiry_interval", cfg.HoldExpiryInterval),
 				zap.Duration("approval_expiry_interval", cfg.ApprovalExpiryInterval),
+				zap.Duration("stuck_approval_threshold", cfg.StuckApprovalThreshold),
 			)
 
 			// Batch close — close expired Merkle batches.
@@ -93,7 +94,7 @@ func startWorker(lc fx.Lifecycle, p *planner.Planner, bm *batch.Manager, cb *vol
 			go func() {
 				defer wg.Done()
 				runTickerWithBackoff(workerCtx, cfg.ApprovalExpiryInterval, logger.Named("approval-expiry"), func(ctx context.Context) error {
-					return p.ExpireStaleApprovals(ctx)
+					return p.ExpireStaleApprovals(ctx, cfg.StuckApprovalThreshold)
 				})
 			}()
 
