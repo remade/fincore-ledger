@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -13,6 +14,15 @@ import (
 
 // Authorize creates a hold (authorization) on funds.
 func (c *Client) Authorize(ctx context.Context, ledgerID, source, asset, amount string, expiresAt time.Time, opts ...SubmitOption) (*pb.SubmitResponse, error) {
+	if err := validateAccount("source", source); err != nil {
+		return nil, err
+	}
+	if err := validateAsset("asset", asset); err != nil {
+		return nil, err
+	}
+	if err := validateAmount("amount", amount); err != nil {
+		return nil, err
+	}
 	intent := &pb.Intent{
 		LedgerId: ledgerID,
 		Operation: &pb.Intent_Authorize{
@@ -30,6 +40,18 @@ func (c *Client) Authorize(ctx context.Context, ledgerID, source, asset, amount 
 
 // Capture captures funds from a hold.
 func (c *Client) Capture(ctx context.Context, ledgerID, holdID, amount, destination string, opts ...SubmitOption) (*pb.SubmitResponse, error) {
+	if holdID == "" {
+		return nil, fmt.Errorf("hold_id is required")
+	}
+	if err := validateAmount("amount", amount); err != nil {
+		return nil, err
+	}
+	// destination is optional (the server falls back to the hold's destination hint).
+	if destination != "" {
+		if err := validateAccount("destination", destination); err != nil {
+			return nil, err
+		}
+	}
 	intent := &pb.Intent{
 		LedgerId: ledgerID,
 		Operation: &pb.Intent_Capture{
@@ -46,6 +68,9 @@ func (c *Client) Capture(ctx context.Context, ledgerID, holdID, amount, destinat
 
 // Void cancels a hold, releasing the authorized funds.
 func (c *Client) Void(ctx context.Context, ledgerID, holdID string, opts ...SubmitOption) (*pb.SubmitResponse, error) {
+	if holdID == "" {
+		return nil, fmt.Errorf("hold_id is required")
+	}
 	intent := &pb.Intent{
 		LedgerId: ledgerID,
 		Operation: &pb.Intent_Void{
@@ -63,15 +88,27 @@ func (c *Client) GetHold(ctx context.Context, ledgerID, holdID string) (*pb.Hold
 
 // ListHolds lists holds for a ledger, optionally filtered by account.
 func (c *Client) ListHolds(ctx context.Context, ledgerID string, account string) ([]*pb.Hold, error) {
-	resp, err := c.ledger.ListHolds(ctx, &pb.ListHoldsRequest{
-		LedgerId: ledgerID,
-		PageSize: 1000,
-		Account:  account,
-	})
-	if err != nil {
-		return nil, err
+	var all []*pb.Hold
+	var pageToken string
+	for {
+		resp, err := c.ledger.ListHolds(ctx, &pb.ListHoldsRequest{
+			LedgerId:  ledgerID,
+			PageSize:  defaultListPageSize,
+			PageToken: pageToken,
+			Account:   account,
+		})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, resp.Holds...)
+		// Stop when the server reports no more pages, or fails to advance the
+		// cursor (defensive guard against a non-progressing token).
+		if resp.NextPageToken == "" || resp.NextPageToken == pageToken {
+			break
+		}
+		pageToken = resp.NextPageToken
 	}
-	return resp.Holds, nil
+	return all, nil
 }
 
 // --- Reversals ---
@@ -124,6 +161,33 @@ type ConvertParams struct {
 
 // Convert performs a currency conversion.
 func (c *Client) Convert(ctx context.Context, ledgerID string, params ConvertParams, opts ...SubmitOption) (*pb.SubmitResponse, error) {
+	if err := validateAccount("source", params.Source); err != nil {
+		return nil, err
+	}
+	if err := validateAccount("destination", params.Destination); err != nil {
+		return nil, err
+	}
+	if err := validateAsset("source_asset", params.SourceAsset); err != nil {
+		return nil, err
+	}
+	if err := validateAsset("dest_asset", params.DestAsset); err != nil {
+		return nil, err
+	}
+	if err := validateAmount("source_amount", params.SourceAmount); err != nil {
+		return nil, err
+	}
+	if err := validateAmount("dest_amount", params.DestAmount); err != nil {
+		return nil, err
+	}
+	// Slippage is optional; validate the pair only when an amount is supplied.
+	if params.SlippageAmount != "" {
+		if err := validateAccount("slippage_account", params.SlippageAccount); err != nil {
+			return nil, err
+		}
+		if err := validateAmount("slippage_amount", params.SlippageAmount); err != nil {
+			return nil, err
+		}
+	}
 	intent := &pb.Intent{
 		LedgerId: ledgerID,
 		Operation: &pb.Intent_Convert{

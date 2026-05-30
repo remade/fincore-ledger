@@ -181,8 +181,17 @@ type TransactionRecord struct {
 	ValidTime     time.Time
 	SystemTime    time.Time
 	Reference     string
-	Postings      any // JSON-serializable
+	Postings      []PostingRecord
 	Metadata      map[string]any
+}
+
+// PostingRecord is a single posting as stored/serialized on a transaction. Amount
+// is a decimal string to preserve precision across the JSON storage boundary.
+type PostingRecord struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	Amount      string `json:"amount"`
+	Asset       string `json:"asset"`
 }
 
 type ListAccountsParams struct {

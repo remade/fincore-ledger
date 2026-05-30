@@ -104,6 +104,22 @@ func TestSubmitCapture_VoidedAndExpiredRejected(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrHoldExpired)
 }
 
+func TestSubmitCapture_RejectsNonPositiveAmount(t *testing.T) {
+	fs := newFakeStore()
+	fs.addLedger(openLedger("L1", "_world"))
+	fs.addHold(heldRecord("L1", "h1", "alice", "merchant", "USD", 100, 0))
+	p := newPostTestPlanner(fs)
+
+	// Zero, negative, and nil amounts must all be rejected before any state change.
+	for _, amt := range []*big.Int{big.NewInt(0), big.NewInt(-5), nil} {
+		_, err := p.SubmitCapture(context.Background(), "L1", "h1", amt, "merchant", "")
+		require.Error(t, err, "capture must reject non-positive/nil amount %v", amt)
+	}
+	// The hold is untouched after the rejected captures.
+	assert.Equal(t, int64(0), fs.holdRecords["L1|h1"].CapturedAmount.Int64())
+	assert.Empty(t, fs.events)
+}
+
 func TestSubmitVoid_HappyAndAlreadyVoided(t *testing.T) {
 	fs := newFakeStore()
 	fs.addLedger(openLedger("L1", "_world"))

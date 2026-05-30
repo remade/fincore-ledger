@@ -266,3 +266,35 @@ func withDeadlockRetry(ctx context.Context, maxRetries int, fn func() error) err
 		}
 	}
 }
+
+const (
+	backoffRetryInitial = 20 * time.Millisecond
+	backoffRetryMax     = 2 * time.Second
+)
+
+// withBackoffRetry runs fn up to maxRetries+1 times with ctx-aware exponential
+// backoff and jitter, retrying on ANY error. Unlike withDeadlockRetry it is not
+// limited to deadlocks -- it is used for best-effort writes (e.g. audit events)
+// that must survive transient storage failures without a time.Sleep.
+func withBackoffRetry(ctx context.Context, maxRetries int, fn func() error) error {
+	backoff := backoffRetryInitial
+	for attempt := 0; ; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if attempt >= maxRetries {
+			return err
+		}
+		jitter := rand.N(backoff)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff + jitter):
+		}
+		backoff *= 2
+		if backoff > backoffRetryMax {
+			backoff = backoffRetryMax
+		}
+	}
+}

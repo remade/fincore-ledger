@@ -63,13 +63,30 @@ func (c *Client) GetLedger(ctx context.Context, id string) (*pb.Ledger, error) {
 	return c.ledger.GetLedger(ctx, &pb.GetLedgerRequest{Id: id})
 }
 
-// ListLedgers lists all ledgers.
+// defaultListPageSize is the server-side page size requested by the SDK's
+// auto-paginating list helpers.
+const defaultListPageSize = 1000
+
+// ListLedgers lists all ledgers, transparently following pagination so callers
+// receive every ledger rather than only the first page.
 func (c *Client) ListLedgers(ctx context.Context) ([]*pb.Ledger, error) {
-	resp, err := c.ledger.ListLedgers(ctx, &pb.ListLedgersRequest{PageSize: 1000})
-	if err != nil {
-		return nil, err
+	var all []*pb.Ledger
+	var pageToken string
+	for {
+		resp, err := c.ledger.ListLedgers(ctx, &pb.ListLedgersRequest{
+			PageSize:  defaultListPageSize,
+			PageToken: pageToken,
+		})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, resp.Ledgers...)
+		if resp.NextPageToken == "" || resp.NextPageToken == pageToken {
+			break
+		}
+		pageToken = resp.NextPageToken
 	}
-	return resp.Ledgers, nil
+	return all, nil
 }
 
 // SealLedger seals a ledger, preventing further writes.

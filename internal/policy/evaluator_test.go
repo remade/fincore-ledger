@@ -119,6 +119,33 @@ func TestSimpleEvaluator_NoTouchedAccounts(t *testing.T) {
 	assert.True(t, r.Denied)
 }
 
+func TestSimpleEvaluator_ValidatePolicy(t *testing.T) {
+	e := &SimpleEvaluator{}
+
+	valid := []string{
+		"",
+		"deny all",
+		"deny bob",
+		"deny bob post *",
+		"deny * * restricted:*",
+		"# comment only\n\ndeny alice post treasury\n",
+	}
+	for _, p := range valid {
+		assert.NoError(t, e.ValidatePolicy(p), "policy %q should be valid", p)
+	}
+
+	malformed := []string{
+		"allow bob post *", // only deny is supported
+		"deny",             // missing principal
+		"permit everyone",  // unknown verb
+		"deny a b c d e",   // too many fields
+		"deny alice\nfoo",  // second line is garbage
+	}
+	for _, p := range malformed {
+		assert.Error(t, e.ValidatePolicy(p), "policy %q should be rejected", p)
+	}
+}
+
 func TestMatchPattern(t *testing.T) {
 	tests := []struct {
 		pattern string

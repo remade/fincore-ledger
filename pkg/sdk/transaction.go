@@ -79,6 +79,11 @@ func (b *TransactionBuilder) Submit(ctx context.Context) (*pb.SubmitResponse, er
 	if len(b.postings) == 0 {
 		return nil, fmt.Errorf("at least one posting is required")
 	}
+	for i, pst := range b.postings {
+		if err := validatePosting(pst.Source, pst.Destination, pst.Amount, pst.Asset); err != nil {
+			return nil, fmt.Errorf("posting %d: %w", i, err)
+		}
+	}
 
 	intent := &pb.Intent{
 		LedgerId:       b.ledgerID,

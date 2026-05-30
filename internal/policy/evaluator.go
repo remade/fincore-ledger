@@ -17,6 +17,11 @@ type Evaluator interface {
 	// Evaluate checks whether the given request is denied by the policy.
 	// policyText is the raw policy document; the format depends on the implementation.
 	Evaluate(policyText, principal, operation string, touchedAccounts []string) Result
+	// ValidatePolicy reports whether policyText is syntactically well-formed,
+	// returning an error describing the first malformed rule line. Callers must
+	// treat a validation failure as fail-closed: a deny-list policy that cannot be
+	// parsed must block the operation, never silently default to allow.
+	ValidatePolicy(policyText string) error
 }
 
 // SimpleEvaluator is a rule-based deny-list policy evaluator.
@@ -84,6 +89,28 @@ func (e *SimpleEvaluator) Evaluate(policyText, principal, operation string, touc
 	}
 
 	return Result{}
+}
+
+// ValidatePolicy checks that every rule line is well-formed, returning an error
+// describing the first malformed line. Unlike Evaluate (which skips lines it does
+// not recognize), this surfaces typos so a misconfigured deny rule is rejected
+// up front instead of being silently ignored.
+func (e *SimpleEvaluator) ValidatePolicy(policyText string) error {
+	lines := strings.Split(policyText, "\n")
+	for i, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || line == "deny all" {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) < 2 || parts[0] != "deny" {
+			return fmt.Errorf("line %d: unrecognized rule %q (expected %q or \"deny <principal> [operation] [account]\")", i+1, line, "deny all")
+		}
+		if len(parts) > 4 {
+			return fmt.Errorf("line %d: too many fields in rule %q (expected at most: deny <principal> <operation> <account>)", i+1, line)
+		}
+	}
+	return nil
 }
 
 // matchPattern matches a value against a pattern supporting "*" wildcard

@@ -169,45 +169,10 @@ func (p *Planner) Approve(ctx context.Context, ledgerID, intentID, principal, si
 		return nil, fmt.Errorf("executing approved intent: %w", err)
 	}
 
-	// Record APPROVAL_RECORDED event -- failures here are logged at ERROR level
-	// so they can be detected and recovered. The intent has already executed
-	// successfully, so the state change is real even if the audit event fails.
-	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-
-	batchID, batchErr := p.batch.CurrentBatchID(ctx, ledgerID)
-	if batchErr != nil {
-		p.logger.Error("AUDIT_GAP: failed to get batch ID for approval event -- audit event not written",
-			zap.String("intent_id", intentID), zap.Error(batchErr))
-	} else {
-		auditTx, txErr := p.store.BeginTx(ctx)
-		if txErr != nil {
-			p.logger.Error("AUDIT_GAP: failed to begin tx for approval event",
-				zap.String("intent_id", intentID), zap.Error(txErr))
-		} else {
-			defer auditTx.Rollback()
-			seq, seqErr := auditTx.NextLedgerSeq(ctx, ledgerID)
-			if seqErr != nil {
-				p.logger.Error("AUDIT_GAP: failed to get seq for approval event",
-					zap.String("intent_id", intentID), zap.Error(seqErr))
-			} else {
-				if appendErr := auditTx.AppendLogEvent(ctx, storage.LogEventRecord{
-					EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-					SystemTime: now, ValidTime: now, Type: storage.EventTypeApprovalRecorded,
-					Payload: approval.IntentPayload,
-					BatchID: batchID, SchemaVersion: 1,
-				}); appendErr != nil {
-					p.logger.Error("AUDIT_GAP: failed to append approval event",
-						zap.String("intent_id", intentID), zap.Error(appendErr))
-				} else if commitErr := auditTx.Commit(); commitErr != nil {
-					p.logger.Error("AUDIT_GAP: failed to commit approval event",
-						zap.String("intent_id", intentID), zap.Error(commitErr))
-				} else {
-					p.publishEvent(ctx, ledgerID, eventID, 13)
-				}
-			}
-		}
-	}
+	// Record the APPROVAL_RECORDED audit event. The intent has already executed,
+	// so the state change is real even if the audit write fails -- we retry with
+	// bounded backoff and, only on exhaustion, log an AUDIT_GAP for recovery.
+	p.recordApprovalAuditEvent(ctx, ledgerID, intentID, approval.IntentPayload)
 
 	// Guarded transition (executing -> executed): if a recovery sweep already
 	// resolved this row, do not overwrite it. Makes the no-clobber invariant
@@ -225,6 +190,60 @@ func (p *Planner) Approve(ctx context.Context, ledgerID, intentID, principal, si
 	)
 
 	return result, nil
+}
+
+// maxAuditRetries bounds the retry attempts for the post-execution audit-event
+// write before an AUDIT_GAP is logged for asynchronous recovery.
+const maxAuditRetries = 3
+
+// recordApprovalAuditEvent writes the APPROVAL_RECORDED audit event for an
+// already-executed intent. Because the financial effect is already committed, a
+// failed audit write must not fail the request; instead it is retried with
+// bounded backoff. The event ID is stable across attempts so an ambiguous commit
+// cannot produce a duplicate audit event. On exhaustion it logs an AUDIT_GAP so a
+// recovery sweep can backfill the missing event.
+func (p *Planner) recordApprovalAuditEvent(ctx context.Context, ledgerID, intentID string, payload []byte) {
+	now := time.Now().UTC()
+	eventID := ulid.Make().String()
+
+	writeOnce := func() error {
+		batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+		if err != nil {
+			return fmt.Errorf("getting batch ID: %w", err)
+		}
+		auditTx, err := p.store.BeginTx(ctx)
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+		defer auditTx.Rollback()
+		seq, err := auditTx.NextLedgerSeq(ctx, ledgerID)
+		if err != nil {
+			return fmt.Errorf("next seq: %w", err)
+		}
+		if err := auditTx.AppendLogEvent(ctx, storage.LogEventRecord{
+			EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
+			SystemTime: now, ValidTime: now, Type: storage.EventTypeApprovalRecorded,
+			Payload: payload,
+			BatchID: batchID, SchemaVersion: 1,
+		}); err != nil {
+			return fmt.Errorf("append event: %w", err)
+		}
+		if err := auditTx.Commit(); err != nil {
+			return fmt.Errorf("commit: %w", err)
+		}
+		return nil
+	}
+
+	if err := withBackoffRetry(ctx, maxAuditRetries, writeOnce); err != nil {
+		p.logger.Error("AUDIT_GAP: failed to write approval audit event after retries -- intent executed but audit trail is missing; recovery sweep required",
+			zap.String("intent_id", intentID),
+			zap.String("ledger_id", ledgerID),
+			zap.String("event_id", eventID),
+			zap.Int("attempts", maxAuditRetries+1),
+			zap.Error(err))
+		return
+	}
+	p.publishEvent(ctx, ledgerID, eventID, 13)
 }
 
 // approvalExecutionKey returns the idempotency key used to execute an approved

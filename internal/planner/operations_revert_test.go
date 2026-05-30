@@ -14,8 +14,8 @@ import (
 func originalTx(ledgerID, txID, src, dst, amount, asset string) *storage.TransactionRecord {
 	return &storage.TransactionRecord{
 		LedgerID: ledgerID, TransactionID: txID, ValidTime: time.Unix(1000, 0).UTC(),
-		Postings: []map[string]any{
-			{"source": src, "destination": dst, "amount": amount, "asset": asset},
+		Postings: []storage.PostingRecord{
+			{Source: src, Destination: dst, Amount: amount, Asset: asset},
 		},
 		Metadata: map[string]any{},
 	}

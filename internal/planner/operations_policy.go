@@ -44,6 +44,12 @@ func (p *Planner) checkPolicy(ctx context.Context, ledgerID, principal, operatio
 		return false, "", nil
 	}
 
+	// Fail closed: a stored policy that no longer parses must block the operation
+	// rather than silently evaluate to allow.
+	if err := p.evaluator.ValidatePolicy(pol.CedarPolicy); err != nil {
+		return false, "", fmt.Errorf("active policy for ledger %q is malformed: %w", ledgerID, err)
+	}
+
 	result := p.evaluator.Evaluate(pol.CedarPolicy, principal, operationType, accountsTouched)
 	return result.Denied, result.Reason, nil
 }

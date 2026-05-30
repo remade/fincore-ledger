@@ -64,6 +64,9 @@ func (p *Planner) SubmitAuthorize(ctx context.Context, ledgerID, source, destHin
 
 // SubmitCapture captures (partially or fully) an authorized hold.
 func (p *Planner) SubmitCapture(ctx context.Context, ledgerID, holdID string, amount *big.Int, destination string, idempotencyKey string) (*SubmitResult, error) {
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("capture amount must be positive")
+	}
 	if _, err := p.checkLedgerNotSealed(ctx, ledgerID); err != nil {
 		return nil, err
 	}

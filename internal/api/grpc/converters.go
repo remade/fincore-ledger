@@ -13,13 +13,13 @@ import (
 
 func ledgerRecordToProto(rec *storage.LedgerRecord) *pb.Ledger {
 	l := &pb.Ledger{
-		Id:              rec.ID,
-		BucketId:        rec.BucketID,
-		State:           rec.State,
-		Features:        rec.Features,
-		Metadata:        rec.Metadata,
-		CreatedAt:       timestamppb.New(rec.CreatedAt),
-		IssuerAccounts:  rec.IssuerAccounts,
+		Id:             rec.ID,
+		BucketId:       rec.BucketID,
+		State:          rec.State,
+		Features:       rec.Features,
+		Metadata:       rec.Metadata,
+		CreatedAt:      timestamppb.New(rec.CreatedAt),
+		IssuerAccounts: rec.IssuerAccounts,
 	}
 	if rec.SealedAt != nil {
 		l.SealedAt = timestamppb.New(*rec.SealedAt)
@@ -37,20 +37,9 @@ func txRecordToProto(rec *storage.TransactionRecord) *pb.Transaction {
 		Reference:     rec.Reference,
 	}
 
-	// Convert postings from the stored format.
-	// After JSON round-trip through the DB, []map[string]any becomes []any,
-	// so we must assert each element individually.
-	if rawPostings, ok := rec.Postings.([]any); ok {
-		for _, rp := range rawPostings {
-			if p, ok := rp.(map[string]any); ok {
-				tx.Postings = append(tx.Postings, postingMapToProto(p))
-			}
-		}
-	} else if postings, ok := rec.Postings.([]map[string]any); ok {
-		// Direct from planner (no JSON round-trip).
-		for _, p := range postings {
-			tx.Postings = append(tx.Postings, postingMapToProto(p))
-		}
+	// Postings is now strongly typed ([]PostingRecord), so convert directly.
+	for _, p := range rec.Postings {
+		tx.Postings = append(tx.Postings, postingRecordToProto(p))
 	}
 
 	return tx
@@ -58,8 +47,8 @@ func txRecordToProto(rec *storage.TransactionRecord) *pb.Transaction {
 
 func accountRecordToProto(rec *storage.AccountRecord) *pb.Account {
 	return &pb.Account{
-		LedgerId:  rec.LedgerID,
-		Address:   rec.Address,
+		LedgerId:   rec.LedgerID,
+		Address:    rec.Address,
 		FirstUsage: timestamppb.New(rec.FirstUsage),
 		UpdatedAt:  timestamppb.New(rec.UpdatedAt),
 	}
@@ -108,25 +97,13 @@ func isAlreadyExists(err error) bool {
 	return errors.Is(err, storage.ErrAlreadyExists)
 }
 
-func postingMapToProto(p map[string]any) *pb.Posting {
+func postingRecordToProto(p storage.PostingRecord) *pb.Posting {
 	return &pb.Posting{
-		Source:      mapStr(p, "source"),
-		Destination: mapStr(p, "destination"),
-		Amount:      mapStr(p, "amount"),
-		Asset:       mapStr(p, "asset"),
+		Source:      p.Source,
+		Destination: p.Destination,
+		Amount:      p.Amount,
+		Asset:       p.Asset,
 	}
-}
-
-func mapStr(m map[string]any, key string) string {
-	v, ok := m[key]
-	if !ok || v == nil {
-		return ""
-	}
-	s, ok := v.(string)
-	if !ok {
-		return ""
-	}
-	return s
 }
 
 func mapPlannerError(err error) error {

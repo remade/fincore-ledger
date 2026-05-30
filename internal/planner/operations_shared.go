@@ -1,7 +1,6 @@
 package planner
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -128,13 +127,13 @@ func (p *Planner) doPostInTx(ctx context.Context, txStore storage.TxStore, ledge
 		return nil, fmt.Errorf("getting next seq: %w", err)
 	}
 
-	postingRecords := make([]map[string]any, len(postings))
+	postingRecords := make([]storage.PostingRecord, len(postings))
 	for i, pp := range postings {
-		postingRecords[i] = map[string]any{
-			"source":      pp.Source,
-			"destination": pp.Destination,
-			"amount":      pp.Amount.String(),
-			"asset":       pp.Asset,
+		postingRecords[i] = storage.PostingRecord{
+			Source:      pp.Source,
+			Destination: pp.Destination,
+			Amount:      pp.Amount.String(),
+			Asset:       pp.Asset,
 		}
 	}
 
@@ -390,14 +389,14 @@ func (p *Planner) doConvertInTx(ctx context.Context, txStore storage.TxStore, le
 		}
 	}
 
-	postingRecords := []map[string]any{
-		{"source": params.Source, "destination": params.Destination, "amount": params.SourceAmount.String(), "asset": params.SourceAsset},
-		{"source": params.Destination, "destination": params.Source, "amount": params.DestAmount.String(), "asset": params.DestAsset},
+	postingRecords := []storage.PostingRecord{
+		{Source: params.Source, Destination: params.Destination, Amount: params.SourceAmount.String(), Asset: params.SourceAsset},
+		{Source: params.Destination, Destination: params.Source, Amount: params.DestAmount.String(), Asset: params.DestAsset},
 	}
 	if hasSlippage {
-		postingRecords = append(postingRecords, map[string]any{
-			"source": params.Source, "destination": params.SlippageAccount,
-			"amount": params.SlippageAmount.String(), "asset": params.SourceAsset,
+		postingRecords = append(postingRecords, storage.PostingRecord{
+			Source: params.Source, Destination: params.SlippageAccount,
+			Amount: params.SlippageAmount.String(), Asset: params.SourceAsset,
 		})
 	}
 	if err := txStore.InsertTransaction(ctx, storage.TransactionRecord{
@@ -502,6 +501,9 @@ func (p *Planner) doAuthorizeInTx(ctx context.Context, txStore storage.TxStore, 
 // rejects voided/expired/over-capture, writes the event, advances captured
 // amount, and moves funds source -> destination.
 func (p *Planner) doCaptureInTx(ctx context.Context, txStore storage.TxStore, ledgerID, holdID string, amount *big.Int, destination, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
+	if amount == nil || amount.Sign() <= 0 {
+		return nil, fmt.Errorf("capture amount must be positive")
+	}
 	eventID := ulid.Make().String()
 	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
 	if err != nil {
@@ -590,52 +592,27 @@ func (p *Planner) doCaptureInTx(ctx context.Context, txStore storage.TxStore, le
 	return &SubmitResult{EventID: eventID}, nil
 }
 
-// reversePostings parses an original transaction's postings (json.Number to keep
-// precision) and produces the swapped-direction reversing postings.
-func reversePostings(rawPostings any, originalTxID string) ([]PostingInput, error) {
-	data, err := json.Marshal(rawPostings)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling original postings for revert: %w", err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	var origPostings []map[string]any
-	if err := dec.Decode(&origPostings); err != nil {
-		return nil, fmt.Errorf("parsing original postings for revert: %w", err)
-	}
-	if len(origPostings) == 0 {
+// reversePostings produces the swapped-direction reversing postings for an
+// original transaction. Postings are strongly typed ([]PostingRecord) so no JSON
+// round-trip is needed; amounts are decimal strings parsed strictly.
+func reversePostings(postings []storage.PostingRecord, originalTxID string) ([]PostingInput, error) {
+	if len(postings) == 0 {
 		return nil, fmt.Errorf("original transaction %s has no postings to revert", originalTxID)
 	}
-
-	reversed := make([]PostingInput, 0, len(origPostings))
-	for i, posting := range origPostings {
-		src, srcOK := posting["source"]
-		dst, dstOK := posting["destination"]
-		asset, assetOK := posting["asset"]
-		if !srcOK || !dstOK || !assetOK {
-			return nil, fmt.Errorf("posting %d: missing required field (source/destination/asset) in original transaction %s", i, originalTxID)
-		}
-		var amtStr string
-		switch v := posting["amount"].(type) {
-		case string:
-			amtStr = v
-		case json.Number:
-			amtStr = v.String()
-		default:
-			if posting["amount"] == nil {
-				return nil, fmt.Errorf("posting %d: missing amount in original transaction %s", i, originalTxID)
-			}
-			amtStr = fmt.Sprint(posting["amount"])
-		}
-		amt, ok := new(big.Int).SetString(amtStr, 10)
+	reversed := make([]PostingInput, 0, len(postings))
+	for i, p := range postings {
+		// PostingRecord.Amount is always a canonical decimal string, so parse it
+		// strictly; any non-numeric value fails closed.
+		amt, ok := new(big.Int).SetString(p.Amount, 10)
 		if !ok {
-			return nil, fmt.Errorf("posting %d: invalid amount %q in original transaction %s", i, amtStr, originalTxID)
+			return nil, fmt.Errorf("posting %d: invalid amount %q in original transaction %s", i, p.Amount, originalTxID)
 		}
+		// Reverse the direction: the original source becomes the destination.
 		reversed = append(reversed, PostingInput{
-			Source:      fmt.Sprint(dst),
-			Destination: fmt.Sprint(src),
+			Source:      p.Destination,
+			Destination: p.Source,
 			Amount:      amt,
-			Asset:       fmt.Sprint(asset),
+			Asset:       p.Asset,
 		})
 	}
 	return reversed, nil
@@ -709,11 +686,11 @@ func (p *Planner) doRevertInTx(ctx context.Context, txStore storage.TxStore, led
 		return nil, fmt.Errorf("getting next seq: %w", err)
 	}
 
-	postingRecords := make([]map[string]any, len(reversedPostings))
+	postingRecords := make([]storage.PostingRecord, len(reversedPostings))
 	for i, rp := range reversedPostings {
-		postingRecords[i] = map[string]any{
-			"source": rp.Source, "destination": rp.Destination,
-			"amount": rp.Amount.String(), "asset": rp.Asset,
+		postingRecords[i] = storage.PostingRecord{
+			Source: rp.Source, Destination: rp.Destination,
+			Amount: rp.Amount.String(), Asset: rp.Asset,
 		}
 	}
 
