@@ -20,19 +20,21 @@ import (
 type fakeStore struct {
 	storage.Store
 
-	ledgers      map[string]*storage.LedgerRecord
-	schemas      map[string]*storage.SchemaRecord // key: ledger|version
-	seq          map[string]int64
-	balances     map[string]*balance                      // key: ledger|account|asset
-	holds        map[string]*big.Int                      // key: ledger|account|asset
-	ikRecords    map[string]*storage.IdempotencyKeyRecord // key: ledger|key
-	events       []storage.LogEventRecord
-	eventIDs     map[string]bool // ledger|event_id
-	ikSeen       map[string]bool // ledger|idempotency_key (uniqueness)
-	txByRef      map[string]bool // ledger|reference (reference-conflict)
-	transactions []storage.TransactionRecord
-	accounts     map[string]bool                // ledger|address
-	holdRecords  map[string]*storage.HoldRecord // ledger|holdID
+	ledgers       map[string]*storage.LedgerRecord
+	schemas       map[string]*storage.SchemaRecord // key: ledger|version
+	seq           map[string]int64
+	balances      map[string]*balance                      // key: ledger|account|asset
+	holds         map[string]*big.Int                      // key: ledger|account|asset
+	ikRecords     map[string]*storage.IdempotencyKeyRecord // key: ledger|key
+	events        []storage.LogEventRecord
+	eventIDs      map[string]bool // ledger|event_id
+	ikSeen        map[string]bool // ledger|idempotency_key (uniqueness)
+	txByRef       map[string]bool // ledger|reference (reference-conflict)
+	transactions  []storage.TransactionRecord
+	accounts      map[string]bool                       // ledger|address
+	holdRecords   map[string]*storage.HoldRecord        // ledger|holdID
+	txByID        map[string]*storage.TransactionRecord // ledger|txID
+	relationships []storage.RelationshipRecord
 }
 
 type balance struct{ input, output *big.Int }
@@ -50,7 +52,12 @@ func newFakeStore() *fakeStore {
 		txByRef:     map[string]bool{},
 		accounts:    map[string]bool{},
 		holdRecords: map[string]*storage.HoldRecord{},
+		txByID:      map[string]*storage.TransactionRecord{},
 	}
+}
+
+func (s *fakeStore) addTransaction(rec *storage.TransactionRecord) {
+	s.txByID[rec.LedgerID+"|"+rec.TransactionID] = rec
 }
 
 func (s *fakeStore) addHold(rec *storage.HoldRecord) {
@@ -162,10 +169,44 @@ func (t *fakeTx) InsertTransaction(_ context.Context, tx storage.TransactionReco
 	if tx.Reference != "" && t.parent.txByRef[tx.LedgerID+"|"+tx.Reference] {
 		return storage.ErrTransactionReferenceConflict
 	}
+	rec := tx
 	t.pending = append(t.pending, func() {
 		t.parent.transactions = append(t.parent.transactions, tx)
+		t.parent.txByID[tx.LedgerID+"|"+tx.TransactionID] = &rec
 		if tx.Reference != "" {
 			t.parent.txByRef[tx.LedgerID+"|"+tx.Reference] = true
+		}
+	})
+	return nil
+}
+
+func (t *fakeTx) GetTransaction(_ context.Context, ledgerID, txID string) (*storage.TransactionRecord, error) {
+	if r, ok := t.parent.txByID[ledgerID+"|"+txID]; ok {
+		cp := *r
+		return &cp, nil
+	}
+	return nil, fmt.Errorf("%w: transaction %q", storage.ErrNotFound, txID)
+}
+
+func (t *fakeTx) GetRelationships(_ context.Context, ledgerID, txID string, _ int) ([]storage.RelationshipRecord, error) {
+	var out []storage.RelationshipRecord
+	for _, r := range t.parent.relationships {
+		if r.LedgerID == ledgerID && (r.ParentTxID == txID || r.ChildTxID == txID) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+func (t *fakeTx) InsertRelationship(_ context.Context, r storage.RelationshipRecord) error {
+	t.pending = append(t.pending, func() { t.parent.relationships = append(t.parent.relationships, r) })
+	return nil
+}
+
+func (t *fakeTx) UpdateTransactionMetadata(_ context.Context, ledgerID, txID string, metadata map[string]any) error {
+	t.pending = append(t.pending, func() {
+		if r, ok := t.parent.txByID[ledgerID+"|"+txID]; ok {
+			r.Metadata = metadata
 		}
 	})
 	return nil

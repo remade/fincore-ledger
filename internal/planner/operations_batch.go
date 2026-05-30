@@ -1,7 +1,6 @@
 package planner
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,7 +10,6 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/remade/ledger/internal/storage"
-	"github.com/remade/ledger/pkg/accounts"
 )
 
 // BatchIntent represents a single intent within a batch.
@@ -291,233 +289,12 @@ func (p *Planner) executeVoidInTx(ctx context.Context, txStore storage.TxStore, 
 
 func (p *Planner) executeRevertInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
 	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-	txID := ulid.Make().String()
-
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-
-	origTx, err := txStore.GetTransaction(ctx, ledgerID, intent.OriginalTxID)
-	if err != nil {
-		return nil, err
-	}
-
-	rels, err := txStore.GetRelationships(ctx, ledgerID, intent.OriginalTxID, 1)
-	if err != nil {
-		return nil, err
-	}
-	for _, rel := range rels {
-		if rel.RelationshipType == 0 && rel.ParentTxID == intent.OriginalTxID {
-			return nil, storage.ErrAlreadyReverted
-		}
-	}
-
-	data, err := json.Marshal(origTx.Postings)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling original postings: %w", err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	var origPostings []map[string]any
-	if err := dec.Decode(&origPostings); err != nil {
-		return nil, fmt.Errorf("parsing original postings: %w", err)
-	}
-	if len(origPostings) == 0 {
-		return nil, fmt.Errorf("original transaction %s has no postings", intent.OriginalTxID)
-	}
-
-	var reversedPostings []PostingInput
-	for i, posting := range origPostings {
-		var amtStr string
-		switch v := posting["amount"].(type) {
-		case string:
-			amtStr = v
-		case json.Number:
-			amtStr = v.String()
-		default:
-			amtStr = fmt.Sprint(posting["amount"])
-		}
-		amt, ok := new(big.Int).SetString(amtStr, 10)
-		if !ok {
-			return nil, fmt.Errorf("posting %d: invalid amount %q", i, amtStr)
-		}
-		reversedPostings = append(reversedPostings, PostingInput{
-			Source:      fmt.Sprint(posting["destination"]),
-			Destination: fmt.Sprint(posting["source"]),
-			Amount:      amt,
-			Asset:       fmt.Sprint(posting["asset"]),
-		})
-	}
-
-	ledger, err := txStore.GetLedger(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	vt := now
-	if intent.AtEffectiveDate {
-		vt = origTx.ValidTime
-	}
-
-	if !intent.Force {
-		for _, posting := range reversedPostings {
-			if accounts.IsIssuer(posting.Source, ledger.IssuerAccounts) {
-				continue
-			}
-			bal, err := txStore.GetBalance(ctx, ledgerID, posting.Source, posting.Asset, nil, nil)
-			if err != nil {
-				return nil, err
-			}
-			current := new(big.Int).Sub(bal.Input, bal.Output)
-			activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, posting.Source, posting.Asset)
-			if err != nil {
-				return nil, err
-			}
-			current.Sub(current, activeHolds)
-			if new(big.Int).Sub(current, posting.Amount).Sign() < 0 {
-				return nil, fmt.Errorf("%w: reverting would leave %s negative in %s",
-					storage.ErrInsufficientFunds, posting.Source, posting.Asset)
-			}
-		}
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	postingRecords := make([]map[string]any, len(reversedPostings))
-	for i, rp := range reversedPostings {
-		postingRecords[i] = map[string]any{
-			"source": rp.Source, "destination": rp.Destination,
-			"amount": rp.Amount.String(), "asset": rp.Asset,
-		}
-	}
-
-	metadata := map[string]any{"reverts": intent.OriginalTxID, "revert_reason": intent.Reason}
-	payload, err := json.Marshal(map[string]any{
-		"transaction_id": txID, "postings": postingRecords, "metadata": metadata,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: vt, Type: storage.EventTypeTransactionReverted,
-		Payload: payload, BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.InsertTransaction(ctx, storage.TransactionRecord{
-		LedgerID: ledgerID, TransactionID: txID, EventID: eventID,
-		ValidTime: vt, SystemTime: now, Postings: postingRecords, Metadata: metadata,
-	}); err != nil {
-		return nil, err
-	}
-
-	touchedAccounts := make(map[string]bool)
-	for _, posting := range reversedPostings {
-		if posting.Amount.Sign() == 0 {
-			continue
-		}
-		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-			LedgerID: ledgerID, Account: posting.Source, Asset: posting.Asset,
-			EventID: eventID, ValidTime: vt, SystemTime: now,
-			InputDelta: big.NewInt(0), OutputDelta: posting.Amount,
-		}); err != nil {
-			return nil, err
-		}
-		if err := txStore.InsertVolumeDelta(ctx, storage.VolumeDeltaRecord{
-			LedgerID: ledgerID, Account: posting.Destination, Asset: posting.Asset,
-			EventID: eventID, ValidTime: vt, SystemTime: now,
-			InputDelta: posting.Amount, OutputDelta: big.NewInt(0),
-		}); err != nil {
-			return nil, err
-		}
-		touchedAccounts[posting.Source] = true
-		touchedAccounts[posting.Destination] = true
-	}
-
-	for addr := range touchedAccounts {
-		if err := txStore.UpsertAccount(ctx, storage.AccountRecord{
-			LedgerID: ledgerID, Address: addr, FirstUsage: now, UpdatedAt: now, Metadata: map[string]any{},
-		}); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := txStore.InsertRelationship(ctx, storage.RelationshipRecord{
-		LedgerID: ledgerID, ParentTxID: intent.OriginalTxID, ChildTxID: txID,
-		RelationshipType: storage.RelationshipTypeReverts, EventID: eventID, SystemTime: now,
-	}); err != nil {
-		return nil, err
-	}
-
-	return &SubmitResult{EventID: eventID, Transaction: &storage.TransactionRecord{
-		LedgerID: ledgerID, TransactionID: txID, EventID: eventID,
-		ValidTime: vt, SystemTime: now, Postings: postingRecords, Metadata: metadata,
-	}}, nil
+	return p.doRevertInTx(ctx, txStore, ledgerID, intent.OriginalTxID, intent.Force, intent.AtEffectiveDate, intent.Reason, "", nil, now)
 }
 
 func (p *Planner) executeAmendInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
 	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err := txStore.GetTransaction(ctx, ledgerID, intent.OriginalTxID); err != nil {
-		return nil, err
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
-	payload, err := json.Marshal(map[string]any{
-		"original_transaction_id": intent.OriginalTxID,
-		"metadata_changes":        intent.Metadata,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeTransactionAmended,
-		Payload: payload, BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.UpdateTransactionMetadata(ctx, ledgerID, intent.OriginalTxID, intent.Metadata); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.InsertMetadataHistory(ctx, storage.MetadataHistoryRecord{
-		LedgerID: ledgerID, TargetType: storage.TargetTypeTransaction,
-		TargetID: intent.OriginalTxID, Revision: seq,
-		Metadata: intent.Metadata, EventID: eventID, SystemTime: now,
-	}); err != nil {
-		return nil, err
-	}
-
-	if err := txStore.InsertRelationship(ctx, storage.RelationshipRecord{
-		LedgerID: ledgerID, ParentTxID: intent.OriginalTxID,
-		ChildTxID: eventID, RelationshipType: storage.RelationshipTypeAmends,
-		EventID: eventID, SystemTime: now,
-	}); err != nil {
-		return nil, err
-	}
-
-	return &SubmitResult{EventID: eventID}, nil
+	return p.doAmendInTx(ctx, txStore, ledgerID, intent.OriginalTxID, intent.Metadata, "", nil, now)
 }
 
 func (p *Planner) executeConvertInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, intent BatchIntent) (*SubmitResult, error) {
