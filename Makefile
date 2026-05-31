@@ -1,17 +1,21 @@
-.PHONY: build test lint proto migrate-up migrate-down dev-up dev-down clean conformance docker-build
+.PHONY: build test lint proto openapi migrate-up migrate-down dev-up dev-down dev-token clean conformance docker-build
 
 # Binaries
-SERVER_BIN  := bin/server
-WORKER_BIN  := bin/worker
-CTL_BIN     := bin/ledgerctl
+SERVER_BIN   := bin/server
+WORKER_BIN   := bin/worker
+CTL_BIN      := bin/ledgerctl
+DEVTOKEN_BIN := bin/devtoken
 
 # Go
 GO          := go
 GOFLAGS     :=
 
+# Docker Compose file defining the local dev stack.
+COMPOSE     := compose.yml
+
 # ---- Build ----
 
-build: $(SERVER_BIN) $(WORKER_BIN) $(CTL_BIN)
+build: $(SERVER_BIN) $(WORKER_BIN) $(CTL_BIN) $(DEVTOKEN_BIN)
 
 $(SERVER_BIN):
 	$(GO) build $(GOFLAGS) -o $@ ./cmd/server
@@ -21,6 +25,9 @@ $(WORKER_BIN):
 
 $(CTL_BIN):
 	$(GO) build $(GOFLAGS) -o $@ ./cmd/ledgerctl
+
+$(DEVTOKEN_BIN):
+	$(GO) build $(GOFLAGS) -o $@ ./cmd/devtoken
 
 # ---- Test ----
 
@@ -53,6 +60,12 @@ proto:
 		--grpc-gateway_out=pkg/proto --grpc-gateway_opt=paths=source_relative \
 		proto/ledger/v1/api.proto
 
+# Generate the embedded OpenAPI/Swagger spec from the same proto sources, using buf's
+# remote openapiv2 plugin (no local protoc-gen-openapiv2 install needed). Output is
+# committed at internal/api/openapi/api.swagger.json and served by the server.
+openapi:
+	cd proto && buf generate --template buf.gen.openapi.yaml
+
 # ---- Migrations ----
 
 LEDGER_POSTGRES_DSN ?= postgres://localhost:5432/ledger?sslmode=disable
@@ -66,13 +79,18 @@ migrate-down:
 # ---- Docker ----
 
 docker-build:
-	docker compose -f deploy/docker-compose/docker-compose.yml build
+	docker compose -f $(COMPOSE) build
 
 dev-up:
-	docker compose -f deploy/docker-compose/docker-compose.yml up -d --build
+	docker compose -f $(COMPOSE) up -d --build
 
 dev-down:
-	docker compose -f deploy/docker-compose/docker-compose.yml down
+	docker compose -f $(COMPOSE) down
+
+# dev-token prints a bearer token for local use (e.g. ledgerctl --token, grpcurl).
+# Requires the dev stack (and the devtoken service) to be running via 'make dev-up'.
+dev-token:
+	@curl -fsS 'http://localhost:8081/token?sub=dev&ledgers=*'
 
 # ---- Clean ----
 

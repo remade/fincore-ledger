@@ -52,24 +52,20 @@ func TestValidateImportEvent_Rejects(t *testing.T) {
 }
 
 func TestRequireImportExportAuthz(t *testing.T) {
-	// Auth disabled without the explicit opt-in: default-deny.
-	denied := &LedgerService{authEnabled: false}
+	// Import/Export is admin-only and default-deny: a nil admin set denies anyone.
+	denied := &LedgerService{}
 	err0 := denied.requireImportExportAuthz("anyone")
 	require.Error(t, err0)
 	assert.Equal(t, codes.PermissionDenied, status.Code(err0))
 
-	// Auth disabled with the development opt-in: allowed.
-	open := &LedgerService{authEnabled: false, allowAnonymousAdmin: true}
-	require.NoError(t, open.requireImportExportAuthz("anyone"))
-
-	// Auth enabled, empty admin set: default-deny.
-	closed := &LedgerService{authEnabled: true, adminPrincipals: map[string]bool{}}
+	// An empty admin set also denies everyone.
+	closed := &LedgerService{adminPrincipals: map[string]bool{}}
 	err := closed.requireImportExportAuthz("alice")
 	require.Error(t, err)
 	assert.Equal(t, codes.PermissionDenied, status.Code(err))
 
-	// Auth enabled with an admin allow-list: only listed principals pass.
-	gated := &LedgerService{authEnabled: true, adminPrincipals: map[string]bool{"ops-admin": true}}
+	// An admin allow-list: only listed principals pass.
+	gated := &LedgerService{adminPrincipals: map[string]bool{"ops-admin": true}}
 	require.NoError(t, gated.requireImportExportAuthz("ops-admin"))
 	err = gated.requireImportExportAuthz("alice")
 	require.Error(t, err)

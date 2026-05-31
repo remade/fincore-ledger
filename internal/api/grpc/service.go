@@ -33,13 +33,9 @@ type LedgerService struct {
 	subs    *subscriptions.Manager
 	logger  *zap.Logger
 
-	// authEnabled and adminPrincipals gate the privileged Import/Export RPCs.
-	authEnabled     bool
+	// adminPrincipals are the only principals permitted to use the privileged
+	// Import/Export RPCs (empty => none).
 	adminPrincipals map[string]bool
-	// allowAnonymousAdmin permits Import/Export when auth is disabled. It must be
-	// set explicitly (a development-only opt-in); without it, Import/Export are
-	// denied whenever there is no authenticated admin principal.
-	allowAnonymousAdmin bool
 }
 
 // NewLedgerService creates a new LedgerService.
@@ -49,25 +45,23 @@ func NewLedgerService(store storage.Store, p *planner.Planner, bm *batch.Manager
 		admins[a] = true
 	}
 	return &LedgerService{
-		store:               store,
-		planner:             p,
-		batch:               bm,
-		subs:                sm,
-		logger:              logger.Named("api"),
-		authEnabled:         authCfg.Enabled,
-		adminPrincipals:     admins,
-		allowAnonymousAdmin: authCfg.AllowAnonymousAdmin,
+		store:           store,
+		planner:         p,
+		batch:           bm,
+		subs:            sm,
+		logger:          logger.Named("api"),
+		adminPrincipals: admins,
 	}
 }
 
 // authorizeLedger enforces tenant isolation: an authenticated caller may only
 // access ledgers their token is scoped to via the "ledgers" JWT claim ("*" grants
-// all). When authentication is disabled (development) no Identity is present, so
-// access is allowed for local convenience.
+// all). Authentication is mandatory, so an absent Identity (which can only happen
+// if a non-exempt RPC somehow bypassed the auth interceptor) is denied.
 func (s *LedgerService) authorizeLedger(ctx context.Context, ledgerID string) error {
 	id, ok := auth.IdentityFromContext(ctx)
 	if !ok {
-		return nil // auth disabled (development): no tenant scope to enforce
+		return status.Error(codes.Unauthenticated, "authentication required")
 	}
 	if id.CanAccessLedger(ledgerID) {
 		return nil
@@ -76,18 +70,9 @@ func (s *LedgerService) authorizeLedger(ctx context.Context, ledgerID string) er
 }
 
 // requireImportExportAuthz gates the privileged Import/Export RPCs. These read
-// from / write to the raw source-of-truth log, so they default-deny: when auth is
-// enabled only configured admin principals are permitted; when auth is disabled
-// they are denied unless an explicit development opt-in (allowAnonymousAdmin) is
-// set. This stops a non-production deploy from silently exposing them.
+// from / write to the raw source-of-truth log, so they default-deny: only the
+// configured admin principals are permitted (empty set => nobody).
 func (s *LedgerService) requireImportExportAuthz(principal string) error {
-	if !s.authEnabled {
-		if s.allowAnonymousAdmin {
-			return nil
-		}
-		return status.Error(codes.PermissionDenied,
-			"import/export requires an authenticated admin principal (set auth.allow_anonymous_admin to permit anonymously in development)")
-	}
 	if s.adminPrincipals[principal] {
 		return nil
 	}
@@ -175,7 +160,10 @@ func (s *LedgerService) Submit(ctx context.Context, req *pb.SubmitRequest) (*pb.
 	}
 
 	// Policy enforcement: evaluate active policy before executing.
-	principal := extractPrincipal(ctx)
+	principal, err := extractPrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
 	opType, accountsTouched := classifyIntent(intent)
 	if err := s.authorizeLedger(ctx, intent.LedgerId); err != nil {
 		return nil, err
@@ -534,9 +522,12 @@ func (s *LedgerService) VerifyBatch(ctx context.Context, req *pb.VerifyBatchRequ
 
 func (s *LedgerService) Export(req *pb.ExportRequest, stream pb.LedgerService_ExportServer) error {
 	ctx := stream.Context()
-	// Export streams the full event log; require admin authorization (default-deny
-	// under auth) before any data leaves the server, then apply any policy rules.
-	principal := extractPrincipal(ctx)
+	// Export streams the full event log; require admin authorization (default-deny)
+	// before any data leaves the server, then apply any policy rules.
+	principal, err := extractPrincipal(ctx)
+	if err != nil {
+		return err
+	}
 	if err := s.requireImportExportAuthz(principal); err != nil {
 		return err
 	}
@@ -602,9 +593,12 @@ func validateImportEvent(event *pb.LogEvent) error {
 
 func (s *LedgerService) Import(stream pb.LedgerService_ImportServer) error {
 	ctx := stream.Context()
-	principal := extractPrincipal(ctx)
+	principal, err := extractPrincipal(ctx)
+	if err != nil {
+		return err
+	}
 	// Import writes raw events directly to the source-of-truth log; gate it behind
-	// admin authorization (default-deny under auth) before accepting any data.
+	// admin authorization (default-deny) before accepting any data.
 	if err := s.requireImportExportAuthz(principal); err != nil {
 		return err
 	}
@@ -1046,7 +1040,10 @@ func (s *LedgerService) SubmitForApproval(ctx context.Context, req *pb.SubmitFor
 	}
 
 	// Always derive principal from authenticated context, never trust client input.
-	submittedBy := extractPrincipal(ctx)
+	submittedBy, err := extractPrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	expiresIn := time.Duration(req.ExpiresInSeconds) * time.Second
 
@@ -1070,7 +1067,10 @@ func (s *LedgerService) ApproveIntent(ctx context.Context, req *pb.ApproveIntent
 	}
 
 	// Always derive principal from authenticated context, never trust client input.
-	principal := extractPrincipal(ctx)
+	principal, err := extractPrincipal(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	if err := s.authorizeLedger(ctx, req.LedgerId); err != nil {
 		return nil, err
@@ -1211,14 +1211,14 @@ func holdRecordToProto(rec *storage.HoldRecord) *pb.Hold {
 
 // extractPrincipal returns the authenticated principal placed in the context by
 // the auth interceptor. The identity is derived from a validated credential —
-// never from a client-supplied header. When authentication is disabled (a
-// development-only configuration), no principal is present and the anonymous
-// principal is returned.
-func extractPrincipal(ctx context.Context) string {
-	if principal, ok := auth.PrincipalFromContext(ctx); ok {
-		return principal
+// never from a client-supplied header. Authentication is mandatory, so a missing
+// principal (only possible if a non-exempt RPC bypassed the auth interceptor) is
+// rejected rather than attributed to an anonymous caller.
+func extractPrincipal(ctx context.Context) (string, error) {
+	if principal, ok := auth.PrincipalFromContext(ctx); ok && principal != "" {
+		return principal, nil
 	}
-	return auth.AnonymousPrincipal
+	return "", status.Error(codes.Unauthenticated, "authentication required")
 }
 
 // classifyIntent returns the operation type name and list of accounts touched by the intent.

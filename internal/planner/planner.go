@@ -32,6 +32,19 @@ type eventPublisher interface {
 	Publish(ctx context.Context, notification subscriptions.EventNotification) error
 }
 
+const (
+	// ledgerStateSealed is the ledger state that rejects all new writes.
+	ledgerStateSealed = "sealed"
+	// maxDeadlockRetries bounds withDeadlockRetry attempts on a serialization deadlock.
+	maxDeadlockRetries = 5
+	// schemaVersionV1 is the log-event schema version stamped on every event.
+	schemaVersionV1 int64 = 1
+	// featureSchemaEnforcement and featureActiveSchemaVersion are the ledger
+	// feature-map keys that drive chart-of-accounts enforcement.
+	featureSchemaEnforcement   = "schema_enforcement"
+	featureActiveSchemaVersion = "active_schema_version"
+)
+
 // Planner is the single safe-write path. All state-changing operations flow through it.
 type Planner struct {
 	store     storage.Store
@@ -80,7 +93,7 @@ func (p *Planner) checkLedgerNotSealed(ctx context.Context, ledgerID string) (*s
 	if err != nil {
 		return nil, fmt.Errorf("getting ledger: %w", err)
 	}
-	if ledger.State == "sealed" {
+	if ledger.State == ledgerStateSealed {
 		return nil, storage.ErrLedgerSealed
 	}
 	return ledger, nil

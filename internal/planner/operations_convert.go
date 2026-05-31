@@ -5,8 +5,6 @@ import (
 	"math/big"
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/remade/ledger/internal/storage"
 )
 
@@ -44,11 +42,6 @@ func (p *Planner) SubmitConvert(ctx context.Context, ledgerID string, params Con
 		ikHash = computeGenericIdempotencyHash(ledgerID, "convert", params.Source, params.Destination,
 			params.SourceAmount.String(), params.SourceAsset, params.DestAmount.String(), params.DestAsset,
 			params.Rate, params.RateSource)
-		if result, err := p.checkIdempotency(ctx, ledgerID, idempotencyKey, ikHash); err != nil {
-			return nil, err
-		} else if result != nil {
-			return result, nil
-		}
 	}
 
 	now := time.Now().UTC()
@@ -57,39 +50,8 @@ func (p *Planner) SubmitConvert(ctx context.Context, ledgerID string, params Con
 		vt = *params.ValidTime
 	}
 
-	var result *SubmitResult
-	err = withDeadlockRetry(ctx, 5, func() error {
-		txStore, err := p.store.BeginTx(ctx)
-		if err != nil {
-			return err
-		}
-		defer txStore.Rollback()
-
-		r, err := p.doConvertInTx(ctx, txStore, ledger, params, idempotencyKey, ikHash, vt, now)
-		if err != nil {
-			return err
-		}
-		if err := txStore.Commit(); err != nil {
-			return err
-		}
-		if idempotencyKey != "" {
-			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
-		}
-		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeConversionCreated)
-		p.logger.Debug("conversion recorded",
-			zap.String("conversion_id", r.ConversionID),
-			zap.String("source_asset", params.SourceAsset),
-			zap.String("dest_asset", params.DestAsset),
-			zap.String("rate", params.Rate),
-		)
-		result = r
-		return nil
-	})
-	if err != nil {
-		if idempotencyKey != "" && isIdempotencyConflict(err) {
-			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
-		}
-		return nil, err
-	}
-	return result, nil
+	return p.submitWithIdempotency(ctx, ledgerID, idempotencyKey, ikHash, storage.EventTypeConversionCreated, false,
+		func(txStore storage.TxStore) (*SubmitResult, error) {
+			return p.doConvertInTx(ctx, txStore, ledger, params, idempotencyKey, ikHash, vt, now)
+		})
 }

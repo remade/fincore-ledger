@@ -22,11 +22,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// AnonymousPrincipal is the principal used when authentication is disabled. It
-// must only occur in development; configuration validation forbids running the
-// production environment without authentication.
-const AnonymousPrincipal = "anonymous"
-
 // jwksMinRefreshInterval bounds how often the JWKS cache refetches keys when it
 // encounters an unknown key ID, protecting the issuer from refresh storms.
 const jwksMinRefreshInterval = 15 * time.Minute
@@ -47,7 +42,8 @@ type principalContextKey struct{}
 var ErrUnauthenticated = errors.New("unauthenticated")
 
 // PrincipalFromContext returns the authenticated principal stored by an auth
-// interceptor. ok is false when the context carries no principal.
+// interceptor. ok is false only for methods exempt from authentication (health
+// checks, reflection), which carry no principal.
 func PrincipalFromContext(ctx context.Context) (principal string, ok bool) {
 	p, ok := ctx.Value(principalContextKey{}).(string)
 	return p, ok
@@ -83,8 +79,8 @@ func (i Identity) CanAccessLedger(ledgerID string) bool {
 func (i Identity) AllLedgers() bool { return i.allLedgers }
 
 // IdentityFromContext returns the authenticated Identity stored by an auth
-// interceptor. ok is false when the context carries no identity (e.g. when
-// authentication is disabled in development).
+// interceptor. ok is false only for methods exempt from authentication (health
+// checks, reflection), which carry no identity.
 func IdentityFromContext(ctx context.Context) (Identity, bool) {
 	id, ok := ctx.Value(identityContextKey{}).(Identity)
 	return id, ok

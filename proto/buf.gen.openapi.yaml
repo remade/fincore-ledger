@@ -1,0 +1,11 @@
+# OpenAPI/Swagger generation, kept separate from buf.gen.yaml so the Go/gRPC/gateway
+# codegen pipeline (driven by `make proto` via protoc) is untouched. Run via `make openapi`.
+# Merges every annotated proto into a single spec at internal/api/openapi/api.swagger.json.
+version: v2
+plugins:
+  - remote: buf.build/grpc-ecosystem/openapiv2
+    out: ../internal/api/openapi
+    opt:
+      - allow_merge=true
+      - merge_file_name=api
+      - json_names_for_fields=true

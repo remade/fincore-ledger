@@ -26,6 +26,17 @@ services:
       timeout: 5s
       retries: 5
 
+  # devtoken is a development-only helper: it serves the JWKS the server verifies
+  # tokens against and mints bearer tokens at /token. Never run it in production.
+  devtoken:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: devtoken
+    command: ["serve", "--addr", ":8081", "--issuer", "https://devtoken.local", "--audience", "ledger"]
+    ports:
+      - "8081:8081"
+
   server:
     build:
       context: .
@@ -39,11 +50,19 @@ services:
       LEDGER_REDIS_URL: redis://:ledger@redis:6379/0
       LEDGER_ENVIRONMENT: development
       LEDGER_LOG_LEVEL: debug
+      # Authentication is mandatory. In development the JWKS is served by devtoken;
+      # conformance-admin is the principal the test harness mints tokens for.
+      LEDGER_AUTH_JWKS_URL: http://devtoken:8081/jwks.json
+      LEDGER_AUTH_AUDIENCE: ledger
+      LEDGER_AUTH_ISSUER: https://devtoken.local
+      LEDGER_AUTH_ADMIN_PRINCIPALS: conformance-admin
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      devtoken:
+        condition: service_started
 
   worker:
     build:

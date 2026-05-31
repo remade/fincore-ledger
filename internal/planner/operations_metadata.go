@@ -23,43 +23,13 @@ func (p *Planner) SubmitSetMetadata(ctx context.Context, ledgerID string, target
 			return nil, fmt.Errorf("marshaling metadata for idempotency hash: %w", err)
 		}
 		ikHash = computeGenericIdempotencyHash(ledgerID, "set_metadata", fmt.Sprint(targetType), targetID, string(metaJSON))
-		if result, err := p.checkIdempotency(ctx, ledgerID, idempotencyKey, ikHash); err != nil {
-			return nil, err
-		} else if result != nil {
-			return result, nil
-		}
 	}
 
 	now := time.Now().UTC()
-	var result *SubmitResult
-	err := withDeadlockRetry(ctx, 5, func() error {
-		txStore, err := p.store.BeginTx(ctx)
-		if err != nil {
-			return fmt.Errorf("beginning tx: %w", err)
-		}
-		defer txStore.Rollback()
-
-		r, err := p.doSetMetadataInTx(ctx, txStore, ledgerID, targetType, targetID, metadata, idempotencyKey, ikHash, now)
-		if err != nil {
-			return err
-		}
-		if err := txStore.Commit(); err != nil {
-			return err
-		}
-		if idempotencyKey != "" {
-			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
-		}
-		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeMetadataSet)
-		result = r
-		return nil
-	})
-	if err != nil {
-		if idempotencyKey != "" && isIdempotencyConflict(err) {
-			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
-		}
-		return nil, err
-	}
-	return result, nil
+	return p.submitWithIdempotency(ctx, ledgerID, idempotencyKey, ikHash, storage.EventTypeMetadataSet, false,
+		func(txStore storage.TxStore) (*SubmitResult, error) {
+			return p.doSetMetadataInTx(ctx, txStore, ledgerID, targetType, targetID, metadata, idempotencyKey, ikHash, now)
+		})
 }
 
 // SubmitDeleteMetadata handles a DeleteMetadataOperation.
@@ -71,41 +41,11 @@ func (p *Planner) SubmitDeleteMetadata(ctx context.Context, ledgerID string, tar
 	var ikHash []byte
 	if idempotencyKey != "" {
 		ikHash = computeGenericIdempotencyHash(ledgerID, "delete_metadata", fmt.Sprint(targetType), targetID, key)
-		if result, err := p.checkIdempotency(ctx, ledgerID, idempotencyKey, ikHash); err != nil {
-			return nil, err
-		} else if result != nil {
-			return result, nil
-		}
 	}
 
 	now := time.Now().UTC()
-	var result *SubmitResult
-	err := withDeadlockRetry(ctx, 5, func() error {
-		txStore, err := p.store.BeginTx(ctx)
-		if err != nil {
-			return fmt.Errorf("beginning tx: %w", err)
-		}
-		defer txStore.Rollback()
-
-		r, err := p.doDeleteMetadataInTx(ctx, txStore, ledgerID, targetType, targetID, key, idempotencyKey, ikHash, now)
-		if err != nil {
-			return err
-		}
-		if err := txStore.Commit(); err != nil {
-			return err
-		}
-		if idempotencyKey != "" {
-			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
-		}
-		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeMetadataDeleted)
-		result = r
-		return nil
-	})
-	if err != nil {
-		if idempotencyKey != "" && isIdempotencyConflict(err) {
-			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
-		}
-		return nil, err
-	}
-	return result, nil
+	return p.submitWithIdempotency(ctx, ledgerID, idempotencyKey, ikHash, storage.EventTypeMetadataDeleted, false,
+		func(txStore storage.TxStore) (*SubmitResult, error) {
+			return p.doDeleteMetadataInTx(ctx, txStore, ledgerID, targetType, targetID, key, idempotencyKey, ikHash, now)
+		})
 }

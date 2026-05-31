@@ -2,8 +2,14 @@ version: v2
 modules:
   - path: .
     name: buf.build/remade/ledger
+    # third_party/ holds protos vendored only for protoc (`make proto`). buf resolves
+    # the same imports from BSR deps below, so excluding it avoids duplicate-symbol
+    # conflicts (e.g. google.api.http defined twice).
+    excludes:
+      - third_party
 deps:
   - buf.build/googleapis/googleapis
+  - buf.build/grpc-ecosystem/grpc-gateway
 lint:
   use:
     - STANDARD

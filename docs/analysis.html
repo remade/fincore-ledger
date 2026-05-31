@@ -376,7 +376,7 @@ flowchart LR
   <figure>
     <pre class="mermaid">
 flowchart TB
-    S["Submit(intent)"] --> P["extract principal<br/>(x-principal header,<br/>else 'anonymous')"]
+    S["Submit(intent)"] --> P["extract principal<br/>(from validated JWT;<br/>auth always required)"]
     P --> E{"policy allows?"}
     E -->|no| D["write denial audit event<br/>→ PermissionDenied"]
     E -->|yes| DISP{"dispatch on<br/>operation type"}

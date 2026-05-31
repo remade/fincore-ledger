@@ -15,12 +15,15 @@ import (
 )
 
 // authorizeLedger enforces tenant isolation: a scoped token may only touch the
-// ledgers it names; "*" grants all; and an absent identity (auth disabled) allows.
+// ledgers it names; "*" grants all; and an absent identity is denied because
+// authentication is mandatory.
 func TestAuthorizeLedger(t *testing.T) {
 	s := &LedgerService{}
 
-	// No identity in context (auth disabled / development): allowed.
-	require.NoError(t, s.authorizeLedger(context.Background(), "L1"))
+	// No identity in context: denied (authentication is required).
+	err0 := s.authorizeLedger(context.Background(), "L1")
+	require.Error(t, err0)
+	assert.Equal(t, codes.Unauthenticated, status.Code(err0))
 
 	// Scoped token, matching ledger: allowed.
 	scoped := auth.ContextWithIdentity(context.Background(), auth.NewIdentity("alice", []string{"L1"}, false))

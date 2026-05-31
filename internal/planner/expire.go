@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/oklog/ulid/v2"
 	"go.uber.org/zap"
 
 	"github.com/remade/ledger/internal/storage"
@@ -70,12 +69,6 @@ func (p *Planner) ExpireHolds(ctx context.Context) error {
 
 func (p *Planner) expireSingleHold(ctx context.Context, hold storage.HoldRecord) error {
 	now := time.Now().UTC()
-	eventID := ulid.Make().String()
-
-	batchID, err := p.batch.CurrentBatchID(ctx, hold.LedgerID)
-	if err != nil {
-		return fmt.Errorf("getting batch ID: %w", err)
-	}
 
 	payload, err := json.Marshal(map[string]string{
 		"hold_id": hold.HoldID,
@@ -101,16 +94,8 @@ func (p *Planner) expireSingleHold(ctx context.Context, hold storage.HoldRecord)
 		return nil // already handled
 	}
 
-	seq, err := txStore.NextLedgerSeq(ctx, hold.LedgerID)
+	eventID, _, err := p.appendEvent(ctx, txStore, hold.LedgerID, storage.EventTypeHoldExpired, payload, "", nil, now, now)
 	if err != nil {
-		return err
-	}
-
-	if err := txStore.AppendLogEvent(ctx, storage.LogEventRecord{
-		EventID: eventID, LedgerID: hold.LedgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldExpired,
-		Payload: payload, BatchID: batchID, SchemaVersion: 1,
-	}); err != nil {
 		return err
 	}
 

@@ -7,6 +7,7 @@
 package ledgerv1
 
 import (
+	_ "github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2/options"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -1323,7 +1324,7 @@ var File_ledger_v1_ir_proto protoreflect.FileDescriptor
 
 const file_ledger_v1_ir_proto_rawDesc = "" +
 	"\n" +
-	"\x12ledger/v1/ir.proto\x12\tledger.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xec\a\n" +
+	"\x12ledger/v1/ir.proto\x12\tledger.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a.protoc-gen-openapiv2/options/annotations.proto\"\xec\a\n" +
 	"\x06Intent\x12\x1b\n" +
 	"\tledger_id\x18\x01 \x01(\tR\bledgerId\x129\n" +
 	"\n" +
@@ -1347,25 +1348,25 @@ const file_ledger_v1_ir_proto_rawDesc = "" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12.\n" +
 	"\x05value\x18\x02 \x01(\v2\x18.ledger.v1.MetadataValueR\x05value:\x028\x01B\v\n" +
-	"\toperation\"?\n" +
+	"\toperation\"\xaa\x01\n" +
 	"\rPostOperation\x12.\n" +
-	"\bpostings\x18\x01 \x03(\v2\x12.ledger.v1.PostingR\bpostings\"q\n" +
+	"\bpostings\x18\x01 \x03(\v2\x12.ledger.v1.PostingR\bpostings:i\x92Af2d{\"postings\":[{\"source\":\"_world\",\"destination\":\"users:001:wallet\",\"amount\":\"10000\",\"asset\":\"USD/2\"}]}\"\xcd\x01\n" +
 	"\aPosting\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12 \n" +
 	"\vdestination\x18\x02 \x01(\tR\vdestination\x12\x16\n" +
 	"\x06amount\x18\x03 \x01(\tR\x06amount\x12\x14\n" +
-	"\x05asset\x18\x04 \x01(\tR\x05asset\"\xc0\x01\n" +
+	"\x05asset\x18\x04 \x01(\tR\x05asset:Z\x92AW2U{\"source\":\"_world\",\"destination\":\"users:001:wallet\",\"amount\":\"10000\",\"asset\":\"USD/2\"}\"\xcf\x02\n" +
 	"\x12AuthorizeOperation\x12\x16\n" +
 	"\x06source\x18\x01 \x01(\tR\x06source\x12)\n" +
 	"\x10destination_hint\x18\x02 \x01(\tR\x0fdestinationHint\x12\x16\n" +
 	"\x06amount\x18\x03 \x01(\tR\x06amount\x12\x14\n" +
 	"\x05asset\x18\x04 \x01(\tR\x05asset\x129\n" +
 	"\n" +
-	"expires_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"e\n" +
+	"expires_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt:\x8c\x01\x92A\x88\x012\x85\x01{\"source\":\"users:001:wallet\",\"destinationHint\":\"merchants:shop42\",\"amount\":\"2500\",\"asset\":\"USD/2\",\"expiresAt\":\"2025-12-31T23:59:59Z\"}\"\xc3\x01\n" +
 	"\x10CaptureOperation\x12\x17\n" +
 	"\ahold_id\x18\x01 \x01(\tR\x06holdId\x12\x16\n" +
 	"\x06amount\x18\x02 \x01(\tR\x06amount\x12 \n" +
-	"\vdestination\x18\x03 \x01(\tR\vdestination\"(\n" +
+	"\vdestination\x18\x03 \x01(\tR\vdestination:\\\x92AY2W{\"holdId\":\"01JABCDEF0123456789HOLD01\",\"amount\":\"1500\",\"destination\":\"merchants:shop42\"}\"(\n" +
 	"\rVoidOperation\x12\x17\n" +
 	"\ahold_id\x18\x01 \x01(\tR\x06holdId\"\xf9\x02\n" +
 	"\x10ConvertOperation\x12\x16\n" +

@@ -5,6 +5,7 @@ package ledger.v1;
 option go_package = "github.com/remade/ledger/pkg/proto/ledger/v1;ledgerv1";
 
 import "google/protobuf/timestamp.proto";
+import "protoc-gen-openapiv2/options/annotations.proto";
 
 message Intent {
   string ledger_id = 1;
@@ -29,10 +30,16 @@ message Intent {
 }
 
 message PostOperation {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"postings\":[{\"source\":\"_world\",\"destination\":\"users:001:wallet\",\"amount\":\"10000\",\"asset\":\"USD/2\"}]}"
+  };
   repeated Posting postings = 1;
 }
 
 message Posting {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"source\":\"_world\",\"destination\":\"users:001:wallet\",\"amount\":\"10000\",\"asset\":\"USD/2\"}"
+  };
   string source = 1;
   string destination = 2;
   string amount = 3;
@@ -40,6 +47,9 @@ message Posting {
 }
 
 message AuthorizeOperation {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"source\":\"users:001:wallet\",\"destinationHint\":\"merchants:shop42\",\"amount\":\"2500\",\"asset\":\"USD/2\",\"expiresAt\":\"2025-12-31T23:59:59Z\"}"
+  };
   string source = 1;
   string destination_hint = 2;
   string amount = 3;
@@ -48,6 +58,9 @@ message AuthorizeOperation {
 }
 
 message CaptureOperation {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"holdId\":\"01JABCDEF0123456789HOLD01\",\"amount\":\"1500\",\"destination\":\"merchants:shop42\"}"
+  };
   string hold_id = 1;
   string amount = 2;
   string destination = 3;

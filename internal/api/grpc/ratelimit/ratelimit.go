@@ -105,7 +105,10 @@ func (l *Limiter) allow(ctx context.Context, fullMethod string) (bool, error) {
 }
 
 // principalKey identifies the rate-limit subject: the authenticated principal
-// when present, else the peer IP, else a shared anonymous bucket.
+// when present, else the peer IP, else a shared anonymous bucket. The fallbacks
+// remain necessary because the rate-limit interceptor also runs for methods
+// exempt from authentication (health checks, reflection), which carry no
+// principal.
 func principalKey(ctx context.Context) string {
 	if p, ok := auth.PrincipalFromContext(ctx); ok && p != "" {
 		return "p:" + p

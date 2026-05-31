@@ -11,6 +11,7 @@ import (
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/spf13/pflag"
+	httpSwagger "github.com/swaggo/http-swagger/v2"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -22,6 +23,7 @@ import (
 	grpcapi "github.com/remade/ledger/internal/api/grpc"
 	"github.com/remade/ledger/internal/api/grpc/auth"
 	"github.com/remade/ledger/internal/api/grpc/ratelimit"
+	"github.com/remade/ledger/internal/api/openapi"
 	"github.com/remade/ledger/internal/config"
 	"github.com/remade/ledger/internal/observability"
 	"github.com/remade/ledger/internal/planner"
@@ -78,15 +80,10 @@ func main() {
 	).Run()
 }
 
-// newAuthenticator builds the request authenticator. When authentication is
-// disabled (a development-only configuration), it returns a nil Authenticator
-// and no auth interceptor is wired. The JWKS refresh goroutine is bound to a
-// context cancelled on shutdown.
+// newAuthenticator builds the request authenticator. Authentication is always
+// required, so this fails fast if the JWKS cannot be loaded. The JWKS refresh
+// goroutine is bound to a context cancelled on shutdown.
 func newAuthenticator(lc fx.Lifecycle, cfg *config.Config, logger *zap.Logger) (auth.Authenticator, error) {
-	if !cfg.Auth.Enabled {
-		logger.Warn("authentication is disabled; all requests run as the anonymous principal")
-		return nil, nil
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	authn, err := auth.NewJWTAuthenticator(ctx, cfg.Auth.JWKSURL, cfg.Auth.Audience, cfg.Auth.Issuer)
 	if err != nil {
@@ -118,12 +115,10 @@ func newRateLimiter(cfg config.RateLimitConfig, rc *redis.Client, logger *zap.Lo
 func newGRPCServer(cfg *config.Config, authn auth.Authenticator, rl *ratelimit.Limiter, logger *zap.Logger) *grpc.Server {
 	unary := make([]grpc.UnaryServerInterceptor, 0, 3)
 	stream := make([]grpc.StreamServerInterceptor, 0, 3)
-	if cfg.Auth.Enabled {
-		// Authentication runs first so the principal is established before any
-		// downstream interceptor or handler observes the request.
-		unary = append(unary, auth.NewUnaryServerInterceptor(authn, logger))
-		stream = append(stream, auth.NewStreamServerInterceptor(authn, logger))
-	}
+	// Authentication is mandatory and runs first so the principal is established
+	// before any downstream interceptor or handler observes the request.
+	unary = append(unary, auth.NewUnaryServerInterceptor(authn, logger))
+	stream = append(stream, auth.NewStreamServerInterceptor(authn, logger))
 	if rl != nil {
 		// Rate limiting runs after auth so quotas are keyed on the real principal.
 		unary = append(unary, rl.UnaryServerInterceptor())
@@ -233,6 +228,10 @@ func newHTTPServer(cfg config.HTTPConfig, grpcCfg config.GRPCConfig, db *postgre
 		fmt.Fprintln(w, "ok")
 	})
 
+	// OpenAPI spec + interactive Swagger UI, registered before the catch-all so these
+	// exact/subtree paths take precedence over the gateway.
+	registerDocs(mux, logger)
+
 	// All other paths go to the grpc-gateway (REST API).
 	mux.Handle("/", gwMux)
 
@@ -247,6 +246,20 @@ func newHTTPServer(cfg config.HTTPConfig, grpcCfg config.GRPCConfig, db *postgre
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 		IdleTimeout:       httpIdleTimeout,
 	}, nil
+}
+
+// registerDocs mounts the embedded OpenAPI spec at /openapi.json and the interactive
+// Swagger UI at /swagger/. The spec is generated from the proto sources (`make openapi`)
+// and embedded at build time; the UI assets ship inside the http-swagger module, so the
+// docs need no runtime filesystem or CDN.
+func registerDocs(mux *http.ServeMux, logger *zap.Logger) {
+	mux.HandleFunc("/openapi.json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if _, err := w.Write(openapi.SpecJSON); err != nil {
+			logger.Warn("writing openapi spec", zap.Error(err))
+		}
+	})
+	mux.Handle("/swagger/", httpSwagger.Handler(httpSwagger.URL("/openapi.json")))
 }
 
 func startHTTP(lc fx.Lifecycle, srv *http.Server, logger *zap.Logger) {

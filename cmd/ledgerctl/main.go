@@ -11,6 +11,7 @@ var (
 	outputFormat string
 	serverAddr   string
 	postgresDSN  string
+	authToken    string
 )
 
 func newRootCmd() *cobra.Command {
@@ -24,6 +25,7 @@ func newRootCmd() *cobra.Command {
 	cmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "table", "Output format: table or json")
 	cmd.PersistentFlags().StringVar(&serverAddr, "server-addr", "localhost:9090", "gRPC server address")
 	cmd.PersistentFlags().StringVar(&postgresDSN, "postgres-dsn", "", "PostgreSQL DSN (for migrate commands; env: LEDGER_POSTGRES_DSN)")
+	cmd.PersistentFlags().StringVar(&authToken, "token", os.Getenv("LEDGER_TOKEN"), "Bearer token for authentication (env: LEDGER_TOKEN; get one via 'make dev-token')")
 
 	cmd.AddCommand(newMigrateUpCmd(), newMigrateDownCmd())
 	cmd.AddCommand(newSubmitCmd())

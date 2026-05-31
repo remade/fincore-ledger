@@ -6,9 +6,46 @@ option go_package = "github.com/remade/ledger/pkg/proto/ledger/v1;ledgerv1";
 
 import "google/protobuf/timestamp.proto";
 import "google/api/annotations.proto";
+import "protoc-gen-openapiv2/options/annotations.proto";
 import "ledger/v1/ir.proto";
 import "ledger/v1/events.proto";
 import "ledger/v1/stream.proto";
+
+// Top-level OpenAPI metadata + the Bearer (JWT) security scheme, applied
+// globally so every REST operation shows the "Authorize" lock in Swagger UI.
+option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_swagger) = {
+  info: {
+    title: "Ledger API";
+    version: "1.0";
+    description: "Programmable double-entry accounting engine. An append-only event "
+      "log is the source of truth, with derived projections for balances and "
+      "transactions. All writes flow through the universal submit endpoint "
+      "(`POST /v1/ledgers/{ledger_id}/submit`).";
+    contact: {name: "Ledger API"};
+  };
+  schemes: HTTP;
+  schemes: HTTPS;
+  consumes: "application/json";
+  produces: "application/json";
+  security_definitions: {
+    security: {
+      key: "Bearer";
+      value: {
+        type: TYPE_API_KEY;
+        in: IN_HEADER;
+        name: "Authorization";
+        description: "JWT bearer token. Send as `Authorization: Bearer <token>`. The "
+          "token's `ledgers` claim governs per-ledger access.";
+      };
+    };
+  };
+  security: {
+    security_requirement: {
+      key: "Bearer";
+      value: {};
+    };
+  };
+};
 
 service LedgerService {
   // Ledger lifecycle
@@ -16,6 +53,10 @@ service LedgerService {
     option (google.api.http) = {
       post: "/v1/ledgers"
       body: "*"
+    };
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      summary: "Create a ledger";
+      tags: "Ledgers";
     };
   }
   rpc GetLedger(GetLedgerRequest) returns (Ledger) {
@@ -39,6 +80,14 @@ service LedgerService {
     option (google.api.http) = {
       post: "/v1/ledgers/{intent.ledger_id}/submit"
       body: "*"
+    };
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      summary: "Submit a write operation";
+      description: "Universal write endpoint. The intent's `operation` oneof selects "
+        "the action: post, authorize, capture, void, convert, batch, revert, amend, "
+        "set_metadata, delete_metadata, or insert_schema. Supply `idempotency_key` to "
+        "make retries safe.";
+      tags: "Writes";
     };
   }
 
@@ -112,6 +161,12 @@ service LedgerService {
       post: "/v1/ledgers/{ledger_id}/schemas"
       body: "*"
     };
+    option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_operation) = {
+      summary: "Insert a Chart of Accounts schema";
+      description: "`schema_bytes` is a base64-encoded JSON document defining the valid "
+        "account paths. When schema enforcement is strict, postings must match it.";
+      tags: "Schemas";
+    };
   }
   rpc GetSchema(GetSchemaRequest) returns (Schema) {
     option (google.api.http) = {
@@ -153,6 +208,9 @@ service LedgerService {
 // --- Request/Response messages ---
 
 message CreateLedgerRequest {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"id\":\"demo-ledger\",\"bucketId\":\"_default\",\"metadata\":{\"environment\":\"development\",\"owner\":\"finops-team\"}}"
+  };
   string id = 1;
   string bucket_id = 2;
   map<string, string> metadata = 3;
@@ -177,10 +235,16 @@ message SealLedgerRequest {
 }
 
 message SubmitRequest {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"intent\":{\"ledgerId\":\"demo-ledger\",\"reference\":\"fund-user-001\",\"idempotencyKey\":\"ik-fund-001\",\"operation\":{\"post\":{\"postings\":[{\"source\":\"_world\",\"destination\":\"users:001:wallet\",\"amount\":\"10000\",\"asset\":\"USD/2\"}]}}}}"
+  };
   Intent intent = 1;
 }
 
 message SubmitResponse {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"eventId\":\"01JABCDEF0123456789ABCDEFG\",\"idempotentHit\":false,\"transaction\":{\"ledgerId\":\"demo-ledger\",\"transactionId\":\"01JABCDEF0123456789TXN001\",\"reference\":\"fund-user-001\",\"postings\":[{\"source\":\"_world\",\"destination\":\"users:001:wallet\",\"amount\":\"10000\",\"asset\":\"USD/2\"}]}}"
+  };
   string event_id = 1;
   bool idempotent_hit = 2;
   Intent intent_echo = 3;
@@ -322,6 +386,9 @@ message VerifyBatchResponse {
 }
 
 message InsertSchemaRequest {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"ledgerId\":\"demo-ledger\",\"version\":\"v1\",\"schemaBytes\":\"eyJhY2NvdW50cyI6eyJ1c2VycyI6eyIkdXNlcl9pZCI6eyJ3YWxsZXQiOnsiLnNlbGYiOnt9fX19fSwiX3dvcmxkIjp7Ii5zZWxmIjp7fX0sIm1lcmNoYW50cyI6eyIkbWVyY2hhbnRfaWQiOnsiLnNlbGYiOnt9fX0sImZlZXMiOnsiJGZlZV90eXBlIjp7Ii5zZWxmIjp7fX19fX0=\"}"
+  };
   string ledger_id = 1;
   bytes schema_bytes = 2;
   string version = 3;
@@ -345,6 +412,9 @@ message ImportResponse {
 // --- Domain model messages ---
 
 message Ledger {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"id\":\"demo-ledger\",\"bucketId\":\"_default\",\"state\":\"ACTIVE\",\"metadata\":{\"environment\":\"development\"},\"createdAt\":\"2026-01-15T10:00:00Z\"}"
+  };
   string id = 1;
   string bucket_id = 2;
   string state = 3;
@@ -425,6 +495,9 @@ message Amend {
 }
 
 message Schema {
+  option (grpc.gateway.protoc_gen_openapiv2.options.openapiv2_schema) = {
+    example: "{\"ledgerId\":\"demo-ledger\",\"version\":\"v1\",\"insertedAt\":\"2026-01-15T10:05:00Z\",\"eventId\":\"01JABCDEF0123456789SCHEMA1\"}"
+  };
   string ledger_id = 1;
   string version = 2;
   bytes document = 3;

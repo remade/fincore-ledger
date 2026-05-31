@@ -68,6 +68,85 @@ func validatePostings(postings []PostingInput) error {
 	return nil
 }
 
+// appendEvent acquires the current Merkle batch and the next per-ledger sequence,
+// builds the canonical LogEventRecord (stamping the schema version and wiring the
+// idempotency hash), appends it, and returns the freshly generated event ID and the
+// sequence. The payload and event type are operation-specific; everything else is
+// identical across every operation, so this is the single place that shape lives.
+// The event ID never appears in any payload, so generating it here is safe.
+func (p *Planner) appendEvent(ctx context.Context, txStore storage.TxStore, ledgerID string, eventType int16, payload []byte, idempotencyKey string, ikHash []byte, vt, now time.Time) (string, int64, error) {
+	eventID := ulid.Make().String()
+	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
+	if err != nil {
+		return "", 0, fmt.Errorf("getting batch ID: %w", err)
+	}
+	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
+	if err != nil {
+		return "", 0, fmt.Errorf("getting next seq: %w", err)
+	}
+	logEvent := storage.LogEventRecord{
+		EventID:        eventID,
+		LedgerID:       ledgerID,
+		LedgerSeq:      seq,
+		SystemTime:     now,
+		ValidTime:      vt,
+		Type:           eventType,
+		Payload:        payload,
+		IdempotencyKey: idempotencyKey,
+		BatchID:        batchID,
+		SchemaVersion:  schemaVersionV1,
+	}
+	if idempotencyKey != "" && ikHash != nil {
+		logEvent.IdempotencyHash = ikHash
+	}
+	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+		return "", 0, err
+	}
+	return eventID, seq, nil
+}
+
+// acctAsset is a (account, asset) pair, the bucket balances are tracked per.
+type acctAsset struct{ Account, Asset string }
+
+// availableBalance returns the spendable balance for (account, asset) inside the tx:
+// posted input − posted output − active holds. It is the figure every balance check
+// compares against, so all operations share this one definition.
+func (p *Planner) availableBalance(ctx context.Context, txStore storage.TxStore, ledgerID, account, asset string) (*big.Int, error) {
+	bal, err := txStore.GetBalance(ctx, ledgerID, account, asset, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("getting balance for %s/%s: %w", account, asset, err)
+	}
+	available := new(big.Int).Sub(bal.Input, bal.Output)
+	activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, account, asset)
+	if err != nil {
+		return nil, fmt.Errorf("getting active holds for %s/%s: %w", account, asset, err)
+	}
+	return available.Sub(available, activeHolds), nil
+}
+
+// checkSourceBalances verifies every non-issuer source bucket has enough available
+// balance to cover its net output. Any net input the same operation adds to the same
+// bucket is credited first, so an operation that both debits and credits an account
+// nets out. Runs inside the tx, so the read is TOCTOU-safe.
+func (p *Planner) checkSourceBalances(ctx context.Context, txStore storage.TxStore, ledger *storage.LedgerRecord, netOutputs, netInputs map[acctAsset]*big.Int) error {
+	for key, output := range netOutputs {
+		if accounts.IsIssuer(key.Account, ledger.IssuerAccounts) {
+			continue
+		}
+		available, err := p.availableBalance(ctx, txStore, ledger.ID, key.Account, key.Asset)
+		if err != nil {
+			return err
+		}
+		if netIn, ok := netInputs[key]; ok {
+			available.Add(available, netIn)
+		}
+		if available.Cmp(output) < 0 {
+			return fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, key.Account, key.Asset)
+		}
+	}
+	return nil
+}
+
 // doPostInTx is the shared core of a post operation. It validates, enforces the
 // chart-of-accounts schema, checks balances (TOCTOU-safe inside the tx), and
 // writes the event + transaction + volume deltas + accounts. It records the
@@ -82,14 +161,13 @@ func (p *Planner) doPostInTx(ctx context.Context, txStore storage.TxStore, ledge
 	}
 
 	// Schema enforcement against the active chart of accounts.
-	if mode := ir.SchemaEnforcementMode(ledger.Features["schema_enforcement"]); mode == ir.SchemaStrict || mode == ir.SchemaBestEffort {
-		if err := p.validatePostingsAgainstSchema(ctx, ledger.ID, ledger.Features["active_schema_version"], postings, mode); err != nil {
+	if mode := ir.SchemaEnforcementMode(ledger.Features[featureSchemaEnforcement]); mode == ir.SchemaStrict || mode == ir.SchemaBestEffort {
+		if err := p.validatePostingsAgainstSchema(ctx, ledger.ID, ledger.Features[featureActiveSchemaVersion], postings, mode); err != nil {
 			return nil, err
 		}
 	}
 
 	// Compute net outputs/inputs per (account, asset).
-	type acctAsset struct{ Account, Asset string }
 	netOutputs := make(map[acctAsset]*big.Int)
 	netInputs := make(map[acctAsset]*big.Int)
 	for _, posting := range postings {
@@ -110,26 +188,8 @@ func (p *Planner) doPostInTx(ctx context.Context, txStore storage.TxStore, ledge
 	}
 
 	// Balance checks for non-issuer source accounts (inside the tx, no TOCTOU).
-	for key, output := range netOutputs {
-		if accounts.IsIssuer(key.Account, ledger.IssuerAccounts) {
-			continue
-		}
-		bal, err := txStore.GetBalance(ctx, ledger.ID, key.Account, key.Asset, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("getting balance for %s/%s: %w", key.Account, key.Asset, err)
-		}
-		currentBalance := new(big.Int).Sub(bal.Input, bal.Output)
-		activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledger.ID, key.Account, key.Asset)
-		if err != nil {
-			return nil, fmt.Errorf("getting active holds for %s/%s: %w", key.Account, key.Asset, err)
-		}
-		currentBalance.Sub(currentBalance, activeHolds)
-		if netIn, ok := netInputs[key]; ok {
-			currentBalance.Add(currentBalance, netIn)
-		}
-		if new(big.Int).Sub(currentBalance, output).Sign() < 0 {
-			return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, key.Account, key.Asset)
-		}
+	if err := p.checkSourceBalances(ctx, txStore, ledger, netOutputs, netInputs); err != nil {
+		return nil, err
 	}
 
 	// Dry-run stops here, before any writes; the caller rolls the tx back.
@@ -137,16 +197,7 @@ func (p *Planner) doPostInTx(ctx context.Context, txStore storage.TxStore, ledge
 		return &SubmitResult{EventID: "dry-run"}, nil
 	}
 
-	eventID := ulid.Make().String()
 	txID := ulid.Make().String()
-	batchID, err := p.batch.CurrentBatchID(ctx, ledger.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-	seq, err := txStore.NextLedgerSeq(ctx, ledger.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting next seq: %w", err)
-	}
 
 	postingRecords := make([]storage.PostingRecord, len(postings))
 	for i, pp := range postings {
@@ -168,22 +219,8 @@ func (p *Planner) doPostInTx(ctx context.Context, txStore storage.TxStore, ledge
 		return nil, fmt.Errorf("marshaling event payload: %w", err)
 	}
 
-	logEvent := storage.LogEventRecord{
-		EventID:        eventID,
-		LedgerID:       ledger.ID,
-		LedgerSeq:      seq,
-		SystemTime:     now,
-		ValidTime:      vt,
-		Type:           storage.EventTypeTransactionPosted,
-		Payload:        payload,
-		IdempotencyKey: idempotencyKey,
-		BatchID:        batchID,
-		SchemaVersion:  1,
-	}
-	if idempotencyKey != "" && ikHash != nil {
-		logEvent.IdempotencyHash = ikHash
-	}
-	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+	eventID, _, err := p.appendEvent(ctx, txStore, ledger.ID, storage.EventTypeTransactionPosted, payload, idempotencyKey, ikHash, vt, now)
+	if err != nil {
 		return nil, err
 	}
 
@@ -317,36 +354,20 @@ func (p *Planner) doConvertInTx(ctx context.Context, txStore storage.TxStore, le
 		return nil, err
 	}
 
-	eventID := ulid.Make().String()
 	conversionID := ulid.Make().String()
 	txID := ulid.Make().String()
 
-	batchID, err := p.batch.CurrentBatchID(ctx, ledger.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-	seq, err := txStore.NextLedgerSeq(ctx, ledger.ID)
-	if err != nil {
-		return nil, err
-	}
-
 	// Balance check inside the tx (TOCTOU-safe); total source output includes slippage.
 	if !accounts.IsIssuer(params.Source, ledger.IssuerAccounts) {
-		bal, err := txStore.GetBalance(ctx, ledger.ID, params.Source, params.SourceAsset, nil, nil)
+		available, err := p.availableBalance(ctx, txStore, ledger.ID, params.Source, params.SourceAsset)
 		if err != nil {
 			return nil, err
 		}
-		current := new(big.Int).Sub(bal.Input, bal.Output)
-		activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledger.ID, params.Source, params.SourceAsset)
-		if err != nil {
-			return nil, fmt.Errorf("getting active holds for %s/%s: %w", params.Source, params.SourceAsset, err)
-		}
-		current.Sub(current, activeHolds)
 		totalSourceOutput := new(big.Int).Set(params.SourceAmount)
 		if params.SlippageAmount != nil && params.SlippageAmount.Sign() > 0 {
 			totalSourceOutput.Add(totalSourceOutput, params.SlippageAmount)
 		}
-		if current.Cmp(totalSourceOutput) < 0 {
+		if available.Cmp(totalSourceOutput) < 0 {
 			return nil, fmt.Errorf("%w: account %s, asset %s", storage.ErrInsufficientFunds, params.Source, params.SourceAsset)
 		}
 	}
@@ -366,15 +387,8 @@ func (p *Planner) doConvertInTx(ctx context.Context, txStore storage.TxStore, le
 		return nil, fmt.Errorf("marshaling payload: %w", err)
 	}
 
-	logEvent := storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledger.ID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: vt, Type: storage.EventTypeConversionCreated,
-		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
-	}
-	if idempotencyKey != "" && ikHash != nil {
-		logEvent.IdempotencyHash = ikHash
-	}
-	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+	eventID, _, err := p.appendEvent(ctx, txStore, ledger.ID, storage.EventTypeConversionCreated, payload, idempotencyKey, ikHash, vt, now)
+	if err != nil {
 		return nil, err
 	}
 
@@ -446,30 +460,17 @@ func (p *Planner) doAuthorizeInTx(ctx context.Context, txStore storage.TxStore, 
 		return nil, fmt.Errorf("authorize amount must be positive")
 	}
 
-	eventID := ulid.Make().String()
 	holdID := ulid.Make().String()
-	batchID, err := p.batch.CurrentBatchID(ctx, ledger.ID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-	seq, err := txStore.NextLedgerSeq(ctx, ledger.ID)
-	if err != nil {
-		return nil, err
-	}
 
-	bal, err := txStore.GetBalance(ctx, ledger.ID, source, asset, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	postedBalance := new(big.Int).Sub(bal.Input, bal.Output)
-	activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledger.ID, source, asset)
-	if err != nil {
-		return nil, err
-	}
-	availableBalance := new(big.Int).Sub(postedBalance, activeHolds)
-	if !accounts.IsIssuer(source, ledger.IssuerAccounts) && availableBalance.Cmp(amount) < 0 {
-		return nil, fmt.Errorf("%w: account %s, asset %s (available: %s, requested: %s)",
-			storage.ErrInsufficientFunds, source, asset, availableBalance, amount)
+	if !accounts.IsIssuer(source, ledger.IssuerAccounts) {
+		available, err := p.availableBalance(ctx, txStore, ledger.ID, source, asset)
+		if err != nil {
+			return nil, err
+		}
+		if available.Cmp(amount) < 0 {
+			return nil, fmt.Errorf("%w: account %s, asset %s (available: %s, requested: %s)",
+				storage.ErrInsufficientFunds, source, asset, available, amount)
+		}
 	}
 
 	payload, err := json.Marshal(map[string]string{
@@ -481,15 +482,8 @@ func (p *Planner) doAuthorizeInTx(ctx context.Context, txStore storage.TxStore, 
 		return nil, fmt.Errorf("marshaling payload: %w", err)
 	}
 
-	logEvent := storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledger.ID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldCreated,
-		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
-	}
-	if idempotencyKey != "" && ikHash != nil {
-		logEvent.IdempotencyHash = ikHash
-	}
-	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+	eventID, _, err := p.appendEvent(ctx, txStore, ledger.ID, storage.EventTypeHoldCreated, payload, idempotencyKey, ikHash, now, now)
+	if err != nil {
 		return nil, err
 	}
 
@@ -525,16 +519,6 @@ func (p *Planner) doCaptureInTx(ctx context.Context, txStore storage.TxStore, le
 	if amount == nil || amount.Sign() <= 0 {
 		return nil, fmt.Errorf("capture amount must be positive")
 	}
-	eventID := ulid.Make().String()
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
 	hold, err := txStore.GetHold(ctx, ledgerID, holdID)
 	if err != nil {
 		return nil, err
@@ -567,15 +551,8 @@ func (p *Planner) doCaptureInTx(ctx context.Context, txStore storage.TxStore, le
 		return nil, fmt.Errorf("marshaling payload: %w", err)
 	}
 
-	logEvent := storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldConfirmed,
-		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
-	}
-	if idempotencyKey != "" && ikHash != nil {
-		logEvent.IdempotencyHash = ikHash
-	}
-	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+	eventID, _, err := p.appendEvent(ctx, txStore, ledgerID, storage.EventTypeHoldConfirmed, payload, idempotencyKey, ikHash, now, now)
+	if err != nil {
 		return nil, err
 	}
 
@@ -643,12 +620,7 @@ func reversePostings(postings []storage.PostingRecord, originalTxID string) ([]P
 // rejects double-revert, reverses postings, balance-checks (unless force), and
 // writes the reverting event/transaction/deltas + a reverts relationship.
 func (p *Planner) doRevertInTx(ctx context.Context, txStore storage.TxStore, ledgerID, originalTxID string, force, atEffectiveDate bool, reason, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
-	eventID := ulid.Make().String()
 	txID := ulid.Make().String()
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
 
 	origTx, err := txStore.GetTransaction(ctx, ledgerID, originalTxID)
 	if err != nil {
@@ -685,26 +657,15 @@ func (p *Planner) doRevertInTx(ctx context.Context, txStore storage.TxStore, led
 			if accounts.IsIssuer(posting.Source, ledger.IssuerAccounts) {
 				continue
 			}
-			bal, err := txStore.GetBalance(ctx, ledgerID, posting.Source, posting.Asset, nil, nil)
+			available, err := p.availableBalance(ctx, txStore, ledgerID, posting.Source, posting.Asset)
 			if err != nil {
 				return nil, err
 			}
-			current := new(big.Int).Sub(bal.Input, bal.Output)
-			activeHolds, err := txStore.GetActiveHoldsTotal(ctx, ledgerID, posting.Source, posting.Asset)
-			if err != nil {
-				return nil, fmt.Errorf("getting active holds for %s/%s: %w", posting.Source, posting.Asset, err)
-			}
-			current.Sub(current, activeHolds)
-			if new(big.Int).Sub(current, posting.Amount).Sign() < 0 {
+			if available.Cmp(posting.Amount) < 0 {
 				return nil, fmt.Errorf("%w: reverting would leave %s negative in %s",
 					storage.ErrInsufficientFunds, posting.Source, posting.Asset)
 			}
 		}
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting next seq: %w", err)
 	}
 
 	postingRecords := make([]storage.PostingRecord, len(reversedPostings))
@@ -723,15 +684,8 @@ func (p *Planner) doRevertInTx(ctx context.Context, txStore storage.TxStore, led
 		return nil, fmt.Errorf("marshaling event payload: %w", err)
 	}
 
-	logEvent := storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: vt, Type: storage.EventTypeTransactionReverted,
-		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
-	}
-	if idempotencyKey != "" && ikHash != nil {
-		logEvent.IdempotencyHash = ikHash
-	}
-	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+	eventID, _, err := p.appendEvent(ctx, txStore, ledgerID, storage.EventTypeTransactionReverted, payload, idempotencyKey, ikHash, vt, now)
+	if err != nil {
 		return nil, fmt.Errorf("appending log event: %w", err)
 	}
 
@@ -794,18 +748,7 @@ func (p *Planner) doRevertInTx(ctx context.Context, txStore storage.TxStore, led
 // transaction: verifies it exists, writes the event, overlays metadata, records
 // history, and links an amends relationship.
 func (p *Planner) doAmendInTx(ctx context.Context, txStore storage.TxStore, ledgerID, originalTxID string, metadataChanges map[string]any, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
-	eventID := ulid.Make().String()
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-
 	if _, err := txStore.GetTransaction(ctx, ledgerID, originalTxID); err != nil {
-		return nil, err
-	}
-
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
 		return nil, err
 	}
 
@@ -817,15 +760,8 @@ func (p *Planner) doAmendInTx(ctx context.Context, txStore storage.TxStore, ledg
 		return nil, fmt.Errorf("marshaling payload: %w", err)
 	}
 
-	logEvent := storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeTransactionAmended,
-		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
-	}
-	if idempotencyKey != "" && ikHash != nil {
-		logEvent.IdempotencyHash = ikHash
-	}
-	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+	eventID, seq, err := p.appendEvent(ctx, txStore, ledgerID, storage.EventTypeTransactionAmended, payload, idempotencyKey, ikHash, now, now)
+	if err != nil {
 		return nil, err
 	}
 
@@ -862,16 +798,6 @@ func (p *Planner) doAmendInTx(ctx context.Context, txStore storage.TxStore, ledg
 // the standalone and batch paths; the batch path now also records metadata
 // history (previously skipped), keeping the two consistent.
 func (p *Planner) doSetMetadataInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, targetType int16, targetID string, metadata map[string]any, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
-	eventID := ulid.Make().String()
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
 	payload, err := json.Marshal(map[string]any{
 		"target_type": targetType, "target_id": targetID, "metadata": metadata,
 	})
@@ -879,15 +805,8 @@ func (p *Planner) doSetMetadataInTx(ctx context.Context, txStore storage.TxStore
 		return nil, fmt.Errorf("marshaling payload: %w", err)
 	}
 
-	logEvent := storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeMetadataSet,
-		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
-	}
-	if idempotencyKey != "" && ikHash != nil {
-		logEvent.IdempotencyHash = ikHash
-	}
-	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+	eventID, seq, err := p.appendEvent(ctx, txStore, ledgerID, storage.EventTypeMetadataSet, payload, idempotencyKey, ikHash, now, now)
+	if err != nil {
 		return nil, err
 	}
 
@@ -924,16 +843,6 @@ func (p *Planner) doSetMetadataInTx(ctx context.Context, txStore storage.TxStore
 // batch path now performs the account-key removal + history snapshot it
 // previously skipped.
 func (p *Planner) doDeleteMetadataInTx(ctx context.Context, txStore storage.TxStore, ledgerID string, targetType int16, targetID, key, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
-	eventID := ulid.Make().String()
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
 	payload, err := json.Marshal(map[string]any{
 		"target_type": targetType, "target_id": targetID, "key": key,
 	})
@@ -941,15 +850,8 @@ func (p *Planner) doDeleteMetadataInTx(ctx context.Context, txStore storage.TxSt
 		return nil, fmt.Errorf("marshaling payload: %w", err)
 	}
 
-	logEvent := storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeMetadataDeleted,
-		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
-	}
-	if idempotencyKey != "" && ikHash != nil {
-		logEvent.IdempotencyHash = ikHash
-	}
-	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+	eventID, seq, err := p.appendEvent(ctx, txStore, ledgerID, storage.EventTypeMetadataDeleted, payload, idempotencyKey, ikHash, now, now)
+	if err != nil {
 		return nil, err
 	}
 
@@ -1014,16 +916,6 @@ func (p *Planner) doDeleteMetadataInTx(ctx context.Context, txStore storage.TxSt
 // doVoidInTx is the shared core of a hold void: re-reads the hold, rejects
 // voided/expired, writes the event, and releases the hold.
 func (p *Planner) doVoidInTx(ctx context.Context, txStore storage.TxStore, ledgerID, holdID, idempotencyKey string, ikHash []byte, now time.Time) (*SubmitResult, error) {
-	eventID := ulid.Make().String()
-	batchID, err := p.batch.CurrentBatchID(ctx, ledgerID)
-	if err != nil {
-		return nil, fmt.Errorf("getting batch ID: %w", err)
-	}
-	seq, err := txStore.NextLedgerSeq(ctx, ledgerID)
-	if err != nil {
-		return nil, err
-	}
-
 	hold, err := txStore.GetHold(ctx, ledgerID, holdID)
 	if err != nil {
 		return nil, err
@@ -1040,15 +932,8 @@ func (p *Planner) doVoidInTx(ctx context.Context, txStore storage.TxStore, ledge
 		return nil, fmt.Errorf("marshaling payload: %w", err)
 	}
 
-	logEvent := storage.LogEventRecord{
-		EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
-		SystemTime: now, ValidTime: now, Type: storage.EventTypeHoldVoided,
-		Payload: payload, IdempotencyKey: idempotencyKey, BatchID: batchID, SchemaVersion: 1,
-	}
-	if idempotencyKey != "" && ikHash != nil {
-		logEvent.IdempotencyHash = ikHash
-	}
-	if err := txStore.AppendLogEvent(ctx, logEvent); err != nil {
+	eventID, _, err := p.appendEvent(ctx, txStore, ledgerID, storage.EventTypeHoldVoided, payload, idempotencyKey, ikHash, now, now)
+	if err != nil {
 		return nil, err
 	}
 

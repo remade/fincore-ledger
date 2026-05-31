@@ -1,0 +1,2237 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "Ledger API",
+    "description": "Programmable double-entry accounting engine. An append-only event log is the source of truth, with derived projections for balances and transactions. All writes flow through the universal submit endpoint (`POST /v1/ledgers/{ledger_id}/submit`).",
+    "version": "1.0",
+    "contact": {
+      "name": "Ledger API"
+    }
+  },
+  "tags": [
+    {
+      "name": "LedgerService"
+    }
+  ],
+  "schemes": [
+    "http",
+    "https"
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "paths": {
+    "/v1/ledgers": {
+      "get": {
+        "operationId": "LedgerService_ListLedgers",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListLedgersResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "format": "int32"
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      },
+      "post": {
+        "summary": "Create a ledger",
+        "operationId": "LedgerService_CreateLedger",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Ledger"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/v1CreateLedgerRequest"
+            }
+          }
+        ],
+        "tags": [
+          "Ledgers"
+        ]
+      }
+    },
+    "/v1/ledgers/{id}": {
+      "get": {
+        "operationId": "LedgerService_GetLedger",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Ledger"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{id}/seal": {
+      "post": {
+        "operationId": "LedgerService_SealLedger",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Ledger"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{intent.ledgerId}/submit": {
+      "post": {
+        "summary": "Submit a write operation",
+        "description": "Universal write endpoint. The intent's `operation` oneof selects the action: post, authorize, capture, void, convert, batch, revert, amend, set_metadata, delete_metadata, or insert_schema. Supply `idempotency_key` to make retries safe.",
+        "operationId": "LedgerService_Submit",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1SubmitResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "intent.ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/LedgerServiceSubmitBody"
+            }
+          }
+        ],
+        "tags": [
+          "Writes"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/accounts": {
+      "get": {
+        "operationId": "LedgerService_ListAccounts",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListAccountsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "format": "int32"
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "addressPattern",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "metadataFilter",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/accounts/{account}/balance": {
+      "get": {
+        "operationId": "LedgerService_GetBalance",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetBalanceResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "account",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "asset",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "asOfValid",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "name": "asOfSystem",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "name": "includeHolds",
+            "in": "query",
+            "required": false,
+            "type": "boolean"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/accounts/{address}": {
+      "get": {
+        "operationId": "LedgerService_GetAccount",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Account"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "address",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "asOfValid",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "name": "asOfSystem",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/aggregated-balances": {
+      "get": {
+        "operationId": "LedgerService_GetAggregatedBalances",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetAggregatedBalancesResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "addressPattern",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "asOfValid",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "name": "asOfSystem",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/approvals": {
+      "get": {
+        "operationId": "LedgerService_ListPendingApprovals",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListPendingApprovalsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "format": "int32"
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      },
+      "post": {
+        "summary": "Approvals",
+        "operationId": "LedgerService_SubmitForApproval",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1SubmitForApprovalResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/LedgerServiceSubmitForApprovalBody"
+            }
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/approvals/{intentId}/approve": {
+      "post": {
+        "operationId": "LedgerService_ApproveIntent",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ApproveIntentResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "intentId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/LedgerServiceApproveIntentBody"
+            }
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/batches/{batchId}/verify": {
+      "post": {
+        "operationId": "LedgerService_VerifyBatch",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1VerifyBatchResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "batchId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/export": {
+      "get": {
+        "summary": "Export/Import",
+        "operationId": "LedgerService_Export",
+        "responses": {
+          "200": {
+            "description": "A successful response.(streaming responses)",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "result": {
+                  "$ref": "#/definitions/v1LogEvent"
+                },
+                "error": {
+                  "$ref": "#/definitions/rpcStatus"
+                }
+              },
+              "title": "Stream result of v1LogEvent"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/holds": {
+      "get": {
+        "operationId": "LedgerService_ListHolds",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListHoldsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "format": "int32"
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "account",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/holds/{holdId}": {
+      "get": {
+        "operationId": "LedgerService_GetHold",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Hold"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "holdId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/log": {
+      "get": {
+        "summary": "Log",
+        "operationId": "LedgerService_ListLogEvents",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListLogEventsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "format": "int32"
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/log/{eventId}": {
+      "get": {
+        "operationId": "LedgerService_GetLogEvent",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1LogEvent"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "eventId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/schemas": {
+      "post": {
+        "summary": "Insert a Chart of Accounts schema",
+        "description": "`schema_bytes` is a base64-encoded JSON document defining the valid account paths. When schema enforcement is strict, postings must match it.",
+        "operationId": "LedgerService_InsertSchema",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/ledgerV1Schema"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/LedgerServiceInsertSchemaBody"
+            }
+          }
+        ],
+        "tags": [
+          "Schemas"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/schemas/{version}": {
+      "get": {
+        "operationId": "LedgerService_GetSchema",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/ledgerV1Schema"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/transactions": {
+      "get": {
+        "operationId": "LedgerService_ListTransactions",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ListTransactionsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "format": "int32"
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "asOfValid",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "name": "asOfSystem",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "name": "account",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "reference",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          },
+          {
+            "name": "metadataFilter",
+            "in": "query",
+            "required": false,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/transactions/{transactionId}": {
+      "get": {
+        "summary": "Reads",
+        "operationId": "LedgerService_GetTransaction",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1Transaction"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "transactionId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "asOfValid",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          },
+          {
+            "name": "asOfSystem",
+            "in": "query",
+            "required": false,
+            "type": "string",
+            "format": "date-time"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    },
+    "/v1/ledgers/{ledgerId}/transactions/{transactionId}/relationships": {
+      "get": {
+        "operationId": "LedgerService_GetRelationships",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1GetRelationshipsResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "ledgerId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "transactionId",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "type": "integer",
+            "format": "int32"
+          }
+        ],
+        "tags": [
+          "LedgerService"
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "BatchOperationMode": {
+      "type": "string",
+      "enum": [
+        "ALL_OR_NOTHING",
+        "BEST_EFFORT",
+        "CHECKPOINTED"
+      ],
+      "default": "ALL_OR_NOTHING"
+    },
+    "LedgerServiceApproveIntentBody": {
+      "type": "object",
+      "properties": {
+        "principal": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        }
+      }
+    },
+    "LedgerServiceInsertSchemaBody": {
+      "type": "object",
+      "example": {
+        "ledgerId": "demo-ledger",
+        "version": "v1",
+        "schemaBytes": "eyJhY2NvdW50cyI6eyJ1c2VycyI6eyIkdXNlcl9pZCI6eyJ3YWxsZXQiOnsiLnNlbGYiOnt9fX19fSwiX3dvcmxkIjp7Ii5zZWxmIjp7fX0sIm1lcmNoYW50cyI6eyIkbWVyY2hhbnRfaWQiOnsiLnNlbGYiOnt9fX0sImZlZXMiOnsiJGZlZV90eXBlIjp7Ii5zZWxmIjp7fX19fX0="
+      },
+      "properties": {
+        "schemaBytes": {
+          "type": "string",
+          "format": "byte"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "LedgerServiceSubmitBody": {
+      "type": "object",
+      "example": {
+        "intent": {
+          "ledgerId": "demo-ledger",
+          "reference": "fund-user-001",
+          "idempotencyKey": "ik-fund-001",
+          "operation": {
+            "post": {
+              "postings": [
+                {
+                  "source": "_world",
+                  "destination": "users:001:wallet",
+                  "amount": "10000",
+                  "asset": "USD/2"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "properties": {
+        "intent": {
+          "type": "object",
+          "properties": {
+            "validTime": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "idempotencyKey": {
+              "type": "string"
+            },
+            "reference": {
+              "type": "string"
+            },
+            "metadata": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/definitions/v1MetadataValue"
+              }
+            },
+            "post": {
+              "$ref": "#/definitions/v1PostOperation"
+            },
+            "authorize": {
+              "$ref": "#/definitions/v1AuthorizeOperation"
+            },
+            "capture": {
+              "$ref": "#/definitions/v1CaptureOperation"
+            },
+            "void": {
+              "$ref": "#/definitions/v1VoidOperation"
+            },
+            "convert": {
+              "$ref": "#/definitions/v1ConvertOperation"
+            },
+            "batch": {
+              "$ref": "#/definitions/v1BatchOperation"
+            },
+            "revert": {
+              "$ref": "#/definitions/v1RevertOperation"
+            },
+            "amend": {
+              "$ref": "#/definitions/v1AmendOperation"
+            },
+            "setMetadata": {
+              "$ref": "#/definitions/v1SetMetadataOperation"
+            },
+            "deleteMetadata": {
+              "$ref": "#/definitions/v1DeleteMetadataOperation"
+            },
+            "insertSchema": {
+              "$ref": "#/definitions/v1InsertSchemaOperation"
+            },
+            "dryRun": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "LedgerServiceSubmitForApprovalBody": {
+      "type": "object",
+      "properties": {
+        "intentPayload": {
+          "type": "string",
+          "format": "byte"
+        },
+        "requiredApprovers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "submittedBy": {
+          "type": "string"
+        },
+        "expiresInSeconds": {
+          "type": "string",
+          "format": "int64",
+          "title": "0 = default 24h"
+        }
+      }
+    },
+    "ledgerV1Schema": {
+      "type": "object",
+      "example": {
+        "ledgerId": "demo-ledger",
+        "version": "v1",
+        "insertedAt": "2026-01-15T10:05:00Z",
+        "eventId": "01JABCDEF0123456789SCHEMA1"
+      },
+      "properties": {
+        "ledgerId": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "document": {
+          "type": "string",
+          "format": "byte"
+        },
+        "insertedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "eventId": {
+          "type": "string"
+        }
+      }
+    },
+    "protobufAny": {
+      "type": "object",
+      "properties": {
+        "@type": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": {}
+    },
+    "rpcStatus": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "message": {
+          "type": "string"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/protobufAny"
+          }
+        }
+      }
+    },
+    "v1Account": {
+      "type": "object",
+      "properties": {
+        "ledgerId": {
+          "type": "string"
+        },
+        "address": {
+          "type": "string"
+        },
+        "firstUsage": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/v1MetadataValue"
+          }
+        }
+      }
+    },
+    "v1Amend": {
+      "type": "object",
+      "properties": {
+        "originalTransactionId": {
+          "type": "string"
+        },
+        "metadataChanges": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/v1MetadataValue"
+          }
+        }
+      }
+    },
+    "v1AmendOperation": {
+      "type": "object",
+      "properties": {
+        "originalTransactionId": {
+          "type": "string"
+        },
+        "metadataChanges": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/v1MetadataValue"
+          }
+        }
+      }
+    },
+    "v1ApprovalEntry": {
+      "type": "object",
+      "properties": {
+        "principal": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        },
+        "signedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1ApproveIntentResponse": {
+      "type": "object",
+      "properties": {
+        "fullyApproved": {
+          "type": "boolean"
+        },
+        "eventId": {
+          "type": "string",
+          "title": "populated only when fully approved and executed"
+        },
+        "transaction": {
+          "$ref": "#/definitions/v1Transaction"
+        },
+        "hold": {
+          "$ref": "#/definitions/v1Hold"
+        },
+        "capture": {
+          "$ref": "#/definitions/v1Capture"
+        },
+        "conversion": {
+          "$ref": "#/definitions/v1Conversion"
+        }
+      }
+    },
+    "v1AuthorizeOperation": {
+      "type": "object",
+      "example": {
+        "source": "users:001:wallet",
+        "destinationHint": "merchants:shop42",
+        "amount": "2500",
+        "asset": "USD/2",
+        "expiresAt": "2025-12-31T23:59:59Z"
+      },
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "destinationHint": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "string"
+        },
+        "asset": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1BatchOperation": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/definitions/BatchOperationMode"
+        },
+        "intents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Intent"
+          }
+        }
+      }
+    },
+    "v1BatchResult": {
+      "type": "object",
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1SubmitResponse"
+          }
+        },
+        "successes": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "failures": {
+          "type": "integer",
+          "format": "int32"
+        }
+      }
+    },
+    "v1Capture": {
+      "type": "object",
+      "properties": {
+        "captureId": {
+          "type": "string"
+        },
+        "holdId": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        }
+      }
+    },
+    "v1CaptureOperation": {
+      "type": "object",
+      "example": {
+        "holdId": "01JABCDEF0123456789HOLD01",
+        "amount": "1500",
+        "destination": "merchants:shop42"
+      },
+      "properties": {
+        "holdId": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        }
+      }
+    },
+    "v1Conversion": {
+      "type": "object",
+      "properties": {
+        "conversionId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "sourceAmount": {
+          "type": "string"
+        },
+        "sourceAsset": {
+          "type": "string"
+        },
+        "destinationAmount": {
+          "type": "string"
+        },
+        "destinationAsset": {
+          "type": "string"
+        },
+        "rate": {
+          "type": "string"
+        },
+        "rateSource": {
+          "type": "string"
+        }
+      }
+    },
+    "v1ConvertOperation": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "sourceAmount": {
+          "type": "string"
+        },
+        "sourceAsset": {
+          "type": "string"
+        },
+        "destinationAmount": {
+          "type": "string"
+        },
+        "destinationAsset": {
+          "type": "string"
+        },
+        "rate": {
+          "type": "string"
+        },
+        "rateSource": {
+          "type": "string"
+        },
+        "slippageAccount": {
+          "type": "string"
+        },
+        "slippageAmount": {
+          "type": "string"
+        }
+      }
+    },
+    "v1CreateLedgerRequest": {
+      "type": "object",
+      "example": {
+        "id": "demo-ledger",
+        "bucketId": "_default",
+        "metadata": {
+          "environment": "development",
+          "owner": "finops-team"
+        }
+      },
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "bucketId": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "v1DeleteMetadataOperation": {
+      "type": "object",
+      "properties": {
+        "targetType": {
+          "$ref": "#/definitions/v1DeleteMetadataOperationTargetType"
+        },
+        "targetId": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        }
+      }
+    },
+    "v1DeleteMetadataOperationTargetType": {
+      "type": "string",
+      "enum": [
+        "ACCOUNT",
+        "TRANSACTION"
+      ],
+      "default": "ACCOUNT"
+    },
+    "v1EventType": {
+      "type": "string",
+      "enum": [
+        "EVENT_UNSPECIFIED",
+        "TRANSACTION_POSTED",
+        "HOLD_AUTHORIZED",
+        "HOLD_CAPTURED",
+        "HOLD_VOIDED",
+        "HOLD_EXPIRED",
+        "CONVERSION_RECORDED",
+        "TRANSACTION_REVERTED",
+        "TRANSACTION_AMENDED",
+        "METADATA_SET",
+        "METADATA_DELETED",
+        "SCHEMA_INSERTED",
+        "POLICY_DENIAL",
+        "APPROVAL_RECORDED"
+      ],
+      "default": "EVENT_UNSPECIFIED"
+    },
+    "v1GetAggregatedBalancesResponse": {
+      "type": "object",
+      "properties": {
+        "balances": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "v1GetBalanceResponse": {
+      "type": "object",
+      "properties": {
+        "postedBalance": {
+          "type": "string"
+        },
+        "availableBalance": {
+          "type": "string"
+        },
+        "asset": {
+          "type": "string"
+        },
+        "asOfValid": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "asOfSystem": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1GetRelationshipsResponse": {
+      "type": "object",
+      "properties": {
+        "relationships": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Relationship"
+          }
+        }
+      }
+    },
+    "v1Hold": {
+      "type": "object",
+      "properties": {
+        "ledgerId": {
+          "type": "string"
+        },
+        "holdId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "destinationHint": {
+          "type": "string"
+        },
+        "asset": {
+          "type": "string"
+        },
+        "authorizedAmount": {
+          "type": "string"
+        },
+        "capturedAmount": {
+          "type": "string"
+        },
+        "voided": {
+          "type": "boolean"
+        },
+        "expired": {
+          "type": "boolean"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "validTime": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "systemTime": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1InsertSchemaOperation": {
+      "type": "object",
+      "properties": {
+        "schemaBytes": {
+          "type": "string",
+          "format": "byte"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    },
+    "v1Intent": {
+      "type": "object",
+      "properties": {
+        "ledgerId": {
+          "type": "string"
+        },
+        "validTime": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "reference": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/v1MetadataValue"
+          }
+        },
+        "post": {
+          "$ref": "#/definitions/v1PostOperation"
+        },
+        "authorize": {
+          "$ref": "#/definitions/v1AuthorizeOperation"
+        },
+        "capture": {
+          "$ref": "#/definitions/v1CaptureOperation"
+        },
+        "void": {
+          "$ref": "#/definitions/v1VoidOperation"
+        },
+        "convert": {
+          "$ref": "#/definitions/v1ConvertOperation"
+        },
+        "batch": {
+          "$ref": "#/definitions/v1BatchOperation"
+        },
+        "revert": {
+          "$ref": "#/definitions/v1RevertOperation"
+        },
+        "amend": {
+          "$ref": "#/definitions/v1AmendOperation"
+        },
+        "setMetadata": {
+          "$ref": "#/definitions/v1SetMetadataOperation"
+        },
+        "deleteMetadata": {
+          "$ref": "#/definitions/v1DeleteMetadataOperation"
+        },
+        "insertSchema": {
+          "$ref": "#/definitions/v1InsertSchemaOperation"
+        },
+        "dryRun": {
+          "type": "boolean"
+        }
+      }
+    },
+    "v1Ledger": {
+      "type": "object",
+      "example": {
+        "id": "demo-ledger",
+        "bucketId": "_default",
+        "state": "ACTIVE",
+        "metadata": {
+          "environment": "development"
+        },
+        "createdAt": "2026-01-15T10:00:00Z"
+      },
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "bucketId": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "sealedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "issuerAccounts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "v1ListAccountsResponse": {
+      "type": "object",
+      "properties": {
+        "accounts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Account"
+          }
+        },
+        "nextPageToken": {
+          "type": "string"
+        }
+      }
+    },
+    "v1ListHoldsResponse": {
+      "type": "object",
+      "properties": {
+        "holds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Hold"
+          }
+        },
+        "nextPageToken": {
+          "type": "string"
+        }
+      }
+    },
+    "v1ListLedgersResponse": {
+      "type": "object",
+      "properties": {
+        "ledgers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Ledger"
+          }
+        },
+        "nextPageToken": {
+          "type": "string"
+        }
+      }
+    },
+    "v1ListLogEventsResponse": {
+      "type": "object",
+      "properties": {
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1LogEvent"
+          }
+        },
+        "nextPageToken": {
+          "type": "string"
+        }
+      }
+    },
+    "v1ListPendingApprovalsResponse": {
+      "type": "object",
+      "properties": {
+        "approvals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1PendingApproval"
+          }
+        },
+        "nextPageToken": {
+          "type": "string"
+        }
+      }
+    },
+    "v1ListTransactionsResponse": {
+      "type": "object",
+      "properties": {
+        "transactions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Transaction"
+          }
+        },
+        "nextPageToken": {
+          "type": "string"
+        }
+      }
+    },
+    "v1LogEvent": {
+      "type": "object",
+      "properties": {
+        "eventId": {
+          "type": "string"
+        },
+        "ledgerId": {
+          "type": "string"
+        },
+        "ledgerSeq": {
+          "type": "string",
+          "format": "uint64"
+        },
+        "systemTime": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "validTime": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "idempotencyKey": {
+          "type": "string"
+        },
+        "idempotencyHash": {
+          "type": "string"
+        },
+        "batchId": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "string",
+          "format": "byte"
+        },
+        "type": {
+          "$ref": "#/definitions/v1EventType"
+        },
+        "schemaVersion": {
+          "type": "string",
+          "format": "uint64"
+        }
+      }
+    },
+    "v1MetadataValue": {
+      "type": "object",
+      "properties": {
+        "stringValue": {
+          "type": "string"
+        },
+        "intValue": {
+          "type": "string",
+          "format": "int64"
+        },
+        "boolValue": {
+          "type": "boolean"
+        },
+        "decimalValue": {
+          "type": "string"
+        },
+        "timestampValue": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1PendingApproval": {
+      "type": "object",
+      "properties": {
+        "ledgerId": {
+          "type": "string"
+        },
+        "intentId": {
+          "type": "string"
+        },
+        "intentHash": {
+          "type": "string",
+          "format": "byte"
+        },
+        "requiredApprovers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "receivedApprovals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1ApprovalEntry"
+          }
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "state": {
+          "type": "string"
+        },
+        "submittedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "submittedBy": {
+          "type": "string"
+        }
+      }
+    },
+    "v1PostOperation": {
+      "type": "object",
+      "example": {
+        "postings": [
+          {
+            "source": "_world",
+            "destination": "users:001:wallet",
+            "amount": "10000",
+            "asset": "USD/2"
+          }
+        ]
+      },
+      "properties": {
+        "postings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Posting"
+          }
+        }
+      }
+    },
+    "v1Posting": {
+      "type": "object",
+      "example": {
+        "source": "_world",
+        "destination": "users:001:wallet",
+        "amount": "10000",
+        "asset": "USD/2"
+      },
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "string"
+        },
+        "asset": {
+          "type": "string"
+        }
+      }
+    },
+    "v1Relationship": {
+      "type": "object",
+      "properties": {
+        "parentTxId": {
+          "type": "string"
+        },
+        "childTxId": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/definitions/v1RelationshipType"
+        },
+        "eventId": {
+          "type": "string"
+        },
+        "systemTime": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "v1RelationshipType": {
+      "type": "string",
+      "enum": [
+        "RELATIONSHIP_UNSPECIFIED",
+        "REVERTS",
+        "AMENDS",
+        "SETTLES",
+        "EXTENDS",
+        "REFERENCES"
+      ],
+      "default": "RELATIONSHIP_UNSPECIFIED"
+    },
+    "v1Revert": {
+      "type": "object",
+      "properties": {
+        "originalTransactionId": {
+          "type": "string"
+        },
+        "revertingTransactionId": {
+          "type": "string"
+        }
+      }
+    },
+    "v1RevertOperation": {
+      "type": "object",
+      "properties": {
+        "originalTransactionId": {
+          "type": "string"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "atEffectiveDate": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "v1SetMetadataOperation": {
+      "type": "object",
+      "properties": {
+        "targetType": {
+          "$ref": "#/definitions/v1SetMetadataOperationTargetType"
+        },
+        "targetId": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/v1MetadataValue"
+          }
+        }
+      }
+    },
+    "v1SetMetadataOperationTargetType": {
+      "type": "string",
+      "enum": [
+        "ACCOUNT",
+        "TRANSACTION"
+      ],
+      "default": "ACCOUNT"
+    },
+    "v1SubmitForApprovalResponse": {
+      "type": "object",
+      "properties": {
+        "intentId": {
+          "type": "string"
+        }
+      }
+    },
+    "v1SubmitResponse": {
+      "type": "object",
+      "example": {
+        "eventId": "01JABCDEF0123456789ABCDEFG",
+        "idempotentHit": false,
+        "transaction": {
+          "ledgerId": "demo-ledger",
+          "transactionId": "01JABCDEF0123456789TXN001",
+          "reference": "fund-user-001",
+          "postings": [
+            {
+              "source": "_world",
+              "destination": "users:001:wallet",
+              "amount": "10000",
+              "asset": "USD/2"
+            }
+          ]
+        }
+      },
+      "properties": {
+        "eventId": {
+          "type": "string"
+        },
+        "idempotentHit": {
+          "type": "boolean"
+        },
+        "intentEcho": {
+          "$ref": "#/definitions/v1Intent"
+        },
+        "error": {
+          "type": "string",
+          "title": "non-empty when this intent failed (batch BEST_EFFORT mode)"
+        },
+        "transaction": {
+          "$ref": "#/definitions/v1Transaction"
+        },
+        "hold": {
+          "$ref": "#/definitions/v1Hold"
+        },
+        "capture": {
+          "$ref": "#/definitions/v1Capture"
+        },
+        "conversion": {
+          "$ref": "#/definitions/v1Conversion"
+        },
+        "batchResult": {
+          "$ref": "#/definitions/v1BatchResult"
+        },
+        "revert": {
+          "$ref": "#/definitions/v1Revert"
+        },
+        "amend": {
+          "$ref": "#/definitions/v1Amend"
+        }
+      }
+    },
+    "v1Transaction": {
+      "type": "object",
+      "properties": {
+        "ledgerId": {
+          "type": "string"
+        },
+        "transactionId": {
+          "type": "string"
+        },
+        "eventId": {
+          "type": "string"
+        },
+        "validTime": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "systemTime": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "reference": {
+          "type": "string"
+        },
+        "postings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "$ref": "#/definitions/v1Posting"
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/v1MetadataValue"
+          }
+        }
+      }
+    },
+    "v1VerifyBatchResponse": {
+      "type": "object",
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "merkleRoot": {
+          "type": "string"
+        },
+        "eventCount": {
+          "type": "integer",
+          "format": "int32"
+        }
+      }
+    },
+    "v1VoidOperation": {
+      "type": "object",
+      "properties": {
+        "holdId": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "securityDefinitions": {
+    "Bearer": {
+      "type": "apiKey",
+      "description": "JWT bearer token. Send as `Authorization: Bearer \u003ctoken\u003e`. The token's `ledgers` claim governs per-ledger access.",
+      "name": "Authorization",
+      "in": "header"
+    }
+  },
+  "security": [
+    {
+      "Bearer": []
+    }
+  ]
+}

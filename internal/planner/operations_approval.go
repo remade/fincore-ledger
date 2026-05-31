@@ -220,11 +220,14 @@ func (p *Planner) recordApprovalAuditEvent(ctx context.Context, ledgerID, intent
 		if err != nil {
 			return fmt.Errorf("next seq: %w", err)
 		}
+		// NOTE: this does not use appendEvent because eventID must stay stable across
+		// retries (generated once above) so an ambiguous commit cannot write a duplicate
+		// audit event; appendEvent mints a fresh ID per call.
 		if err := auditTx.AppendLogEvent(ctx, storage.LogEventRecord{
 			EventID: eventID, LedgerID: ledgerID, LedgerSeq: seq,
 			SystemTime: now, ValidTime: now, Type: storage.EventTypeApprovalRecorded,
 			Payload: payload,
-			BatchID: batchID, SchemaVersion: 1,
+			BatchID: batchID, SchemaVersion: schemaVersionV1,
 		}); err != nil {
 			return fmt.Errorf("append event: %w", err)
 		}

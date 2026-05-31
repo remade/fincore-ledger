@@ -26,15 +26,9 @@ func (p *Planner) SubmitPost(ctx context.Context, ledgerID string, postings []Po
 		return nil, err
 	}
 
-	// Check idempotency (Redis first, then PG).
 	var ikHash []byte
 	if idempotencyKey != "" {
 		ikHash = computeIdempotencyHash(ledgerID, postings, reference, metadata, validTime)
-		if result, err := p.checkIdempotency(ctx, ledgerID, idempotencyKey, ikHash); err != nil {
-			return nil, err
-		} else if result != nil {
-			return result, nil
-		}
 	}
 
 	// Get ledger to check issuer accounts and sealed state.
@@ -49,51 +43,10 @@ func (p *Planner) SubmitPost(ctx context.Context, ledgerID string, postings []Po
 		vt = *validTime
 	}
 
-	var result *SubmitResult
-	err = withDeadlockRetry(ctx, 5, func() error {
-		txStore, err := p.store.BeginTx(ctx)
-		if err != nil {
-			return fmt.Errorf("beginning tx: %w", err)
-		}
-		defer txStore.Rollback()
-
-		r, err := p.doPostInTx(ctx, txStore, ledger, postings, reference, metadata, idempotencyKey, ikHash, vt, now, dryRun)
-		if err != nil {
-			// A concurrent writer committing the same idempotency key surfaces as
-			// ErrIdempotencyKeyConflict; the deferred rollback fires and the outer
-			// handler resolves it to an idempotent hit.
-			return err
-		}
-
-		if dryRun {
-			txStore.Rollback()
-			result = r
-			return nil
-		}
-
-		if err := txStore.Commit(); err != nil {
-			return fmt.Errorf("committing transaction: %w", err)
-		}
-
-		if idempotencyKey != "" {
-			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
-		}
-		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeTransactionPosted)
-		p.logger.Debug("transaction posted",
-			zap.String("event_id", r.EventID),
-			zap.String("ledger", ledgerID),
-			zap.Int("postings", len(postings)),
-		)
-		result = r
-		return nil
-	})
-	if err != nil {
-		if idempotencyKey != "" && isIdempotencyConflict(err) {
-			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
-		}
-		return nil, err
-	}
-	return result, nil
+	return p.submitWithIdempotency(ctx, ledgerID, idempotencyKey, ikHash, storage.EventTypeTransactionPosted, dryRun,
+		func(txStore storage.TxStore) (*SubmitResult, error) {
+			return p.doPostInTx(ctx, txStore, ledger, postings, reference, metadata, idempotencyKey, ikHash, vt, now, dryRun)
+		})
 }
 
 // validatePostingsAgainstSchema checks postings against the active schema's chart of accounts.
@@ -240,6 +193,64 @@ func writeHashField(h io.Writer, data []byte) {
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
 	h.Write(lenBuf[:])
 	h.Write(data)
+}
+
+// submitWithIdempotency runs the standalone write path shared by every Submit* method:
+// the 2-tier idempotency lookup, the deadlock-retried transaction (BeginTx → work →
+// Commit), post-commit cache population and event publish, and concurrent-conflict
+// resolution. work runs inside the open transaction and returns the SubmitResult; it
+// must neither commit nor roll back (the shared do*InTx cores it calls record the
+// idempotency key themselves when ikHash is set). On dryRun the transaction is rolled
+// back after work runs and no event is published. The idempotency lookup runs after the
+// caller's ledger/sealed check, consistent across all operations.
+func (p *Planner) submitWithIdempotency(ctx context.Context, ledgerID, idempotencyKey string, ikHash []byte, eventType int16, dryRun bool, work func(txStore storage.TxStore) (*SubmitResult, error)) (*SubmitResult, error) {
+	if idempotencyKey != "" {
+		result, err := p.checkIdempotency(ctx, ledgerID, idempotencyKey, ikHash)
+		if err != nil {
+			return nil, err
+		}
+		if result != nil {
+			return result, nil
+		}
+	}
+
+	var result *SubmitResult
+	err := withDeadlockRetry(ctx, maxDeadlockRetries, func() error {
+		txStore, err := p.store.BeginTx(ctx)
+		if err != nil {
+			return fmt.Errorf("beginning tx: %w", err)
+		}
+		defer txStore.Rollback()
+
+		r, err := work(txStore)
+		if err != nil {
+			return err
+		}
+
+		if dryRun {
+			txStore.Rollback()
+			result = r
+			return nil
+		}
+
+		if err := txStore.Commit(); err != nil {
+			return fmt.Errorf("committing transaction: %w", err)
+		}
+
+		if idempotencyKey != "" {
+			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
+		}
+		p.publishEvent(ctx, ledgerID, r.EventID, eventType)
+		result = r
+		return nil
+	})
+	if err != nil {
+		if idempotencyKey != "" && isIdempotencyConflict(err) {
+			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
+		}
+		return nil, err
+	}
+	return result, nil
 }
 
 // withDeadlockRetry retries fn on deadlock errors with exponential backoff and jitter.

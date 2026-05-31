@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/remade/ledger/internal/storage"
 )
 
@@ -21,48 +19,13 @@ func (p *Planner) SubmitRevert(ctx context.Context, ledgerID, originalTxID strin
 	var ikHash []byte
 	if idempotencyKey != "" {
 		ikHash = computeGenericIdempotencyHash(ledgerID, "revert", originalTxID, fmt.Sprintf("%t", force), fmt.Sprintf("%t", atEffectiveDate), reason)
-		if result, err := p.checkIdempotency(ctx, ledgerID, idempotencyKey, ikHash); err != nil {
-			return nil, err
-		} else if result != nil {
-			return result, nil
-		}
 	}
 
 	now := time.Now().UTC()
-	var result *SubmitResult
-	err := withDeadlockRetry(ctx, 5, func() error {
-		txStore, err := p.store.BeginTx(ctx)
-		if err != nil {
-			return fmt.Errorf("beginning tx: %w", err)
-		}
-		defer txStore.Rollback()
-
-		r, err := p.doRevertInTx(ctx, txStore, ledgerID, originalTxID, force, atEffectiveDate, reason, idempotencyKey, ikHash, now)
-		if err != nil {
-			return err
-		}
-		if err := txStore.Commit(); err != nil {
-			return fmt.Errorf("committing revert transaction: %w", err)
-		}
-		if idempotencyKey != "" {
-			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
-		}
-		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeTransactionReverted)
-		p.logger.Debug("transaction reverted",
-			zap.String("event_id", r.EventID),
-			zap.String("original_tx_id", originalTxID),
-			zap.String("ledger", ledgerID),
-		)
-		result = r
-		return nil
-	})
-	if err != nil {
-		if idempotencyKey != "" && isIdempotencyConflict(err) {
-			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
-		}
-		return nil, err
-	}
-	return result, nil
+	return p.submitWithIdempotency(ctx, ledgerID, idempotencyKey, ikHash, storage.EventTypeTransactionReverted, false,
+		func(txStore storage.TxStore) (*SubmitResult, error) {
+			return p.doRevertInTx(ctx, txStore, ledgerID, originalTxID, force, atEffectiveDate, reason, idempotencyKey, ikHash, now)
+		})
 }
 
 // SubmitAmend overlays metadata changes on an existing transaction.
@@ -78,41 +41,11 @@ func (p *Planner) SubmitAmend(ctx context.Context, ledgerID, originalTxID string
 			return nil, fmt.Errorf("marshaling metadata for idempotency hash: %w", err)
 		}
 		ikHash = computeGenericIdempotencyHash(ledgerID, "amend", originalTxID, string(metaJSON))
-		if result, err := p.checkIdempotency(ctx, ledgerID, idempotencyKey, ikHash); err != nil {
-			return nil, err
-		} else if result != nil {
-			return result, nil
-		}
 	}
 
 	now := time.Now().UTC()
-	var result *SubmitResult
-	err := withDeadlockRetry(ctx, 5, func() error {
-		txStore, err := p.store.BeginTx(ctx)
-		if err != nil {
-			return err
-		}
-		defer txStore.Rollback()
-
-		r, err := p.doAmendInTx(ctx, txStore, ledgerID, originalTxID, metadataChanges, idempotencyKey, ikHash, now)
-		if err != nil {
-			return err
-		}
-		if err := txStore.Commit(); err != nil {
-			return err
-		}
-		if idempotencyKey != "" {
-			p.postCommitIdempotency(ctx, ledgerID, idempotencyKey, r.EventID, ikHash)
-		}
-		p.publishEvent(ctx, ledgerID, r.EventID, storage.EventTypeTransactionAmended)
-		result = r
-		return nil
-	})
-	if err != nil {
-		if idempotencyKey != "" && isIdempotencyConflict(err) {
-			return p.resolveIdempotencyConflict(ctx, ledgerID, idempotencyKey)
-		}
-		return nil, err
-	}
-	return result, nil
+	return p.submitWithIdempotency(ctx, ledgerID, idempotencyKey, ikHash, storage.EventTypeTransactionAmended, false,
+		func(txStore storage.TxStore) (*SubmitResult, error) {
+			return p.doAmendInTx(ctx, txStore, ledgerID, originalTxID, metadataChanges, idempotencyKey, ikHash, now)
+		})
 }

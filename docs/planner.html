@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Planner — Ledger Write Orchestrator</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  document.addEventListener("DOMContentLoaded", function () {
+    if (window.mermaid) {
+      mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose", flowchart: { curve: "basis" } });
+    }
+  });
+</script>
+<style>
+  :root {
+    --bg: #fbfbfd; --fg: #1d1d22; --muted: #5b5b66; --line: #e3e3ea;
+    --accent: #3a5bd9; --accent-soft: #eef1fd; --code-bg: #f4f4f8;
+    --warn-bg: #fff7e6; --warn-line: #f0c674; --ok-bg: #eafaf0; --ok-line: #7fcf9f;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); line-height: 1.62; font-size: 16px; }
+  .layout { display: grid; grid-template-columns: 290px 1fr; max-width: 1400px; margin: 0 auto; }
+  /* Sidebar */
+  nav.toc { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto; padding: 28px 18px 60px; border-right: 1px solid var(--line); font-size: 14px; }
+  nav.toc h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 12px; }
+  nav.toc ol { list-style: none; padding: 0; margin: 0; counter-reset: s; }
+  nav.toc li { margin: 2px 0; }
+  nav.toc a { counter-increment: s; display: block; padding: 4px 8px; border-radius: 6px; color: var(--fg); text-decoration: none; }
+  nav.toc a::before { content: counter(s) ". "; color: var(--muted); }
+  nav.toc a:hover { background: var(--accent-soft); color: var(--accent); }
+  /* Content */
+  main { padding: 40px 56px 120px; min-width: 0; }
+  header.title { border-bottom: 1px solid var(--line); padding-bottom: 22px; margin-bottom: 12px; }
+  header.title h1 { font-size: 34px; margin: 0 0 6px; letter-spacing: -.02em; }
+  header.title p.sub { color: var(--muted); margin: 0; font-size: 17px; }
+  header.title .meta { margin-top: 14px; font-size: 13px; color: var(--muted); }
+  header.title .meta code { font-family: var(--mono); }
+  section { padding-top: 30px; margin-top: 18px; border-top: 1px solid var(--line); }
+  section:first-of-type { border-top: none; }
+  h2.sec { font-size: 25px; letter-spacing: -.01em; margin: 6px 0 14px; }
+  h3 { font-size: 18px; margin: 26px 0 8px; }
+  p, li { color: var(--fg); }
+  .lead { font-size: 17px; color: var(--muted); }
+  code { font-family: var(--mono); font-size: .9em; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-family: var(--mono); font-size: 13.5px; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  .mermaid { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin: 18px 0; text-align: center; }
+  table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14.5px; }
+  th, td { border: 1px solid var(--line); padding: 8px 11px; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); font-weight: 600; }
+  tbody tr:nth-child(even) { background: #fafafc; }
+  .callout { border-radius: 8px; padding: 12px 16px; margin: 16px 0; border: 1px solid; font-size: 15px; }
+  .callout.note { background: var(--accent-soft); border-color: #c4cef5; }
+  .callout.warn { background: var(--warn-bg); border-color: var(--warn-line); }
+  .callout.ok { background: var(--ok-bg); border-color: var(--ok-line); }
+  .callout b { display: inline-block; margin-right: 4px; }
+  .pill { display: inline-block; font-size: 11.5px; font-family: var(--mono); padding: 1px 7px; border-radius: 999px; background: var(--code-bg); border: 1px solid var(--line); color: var(--muted); }
+  .pill.impl { background: var(--ok-bg); border-color: var(--ok-line); color: #1d6b3f; }
+  .pill.todo { background: var(--warn-bg); border-color: var(--warn-line); color: #8a6300; }
+  .fileref { font-family: var(--mono); font-size: .85em; color: var(--muted); }
+  .formula { background: #fff; border: 1px dashed var(--accent); border-radius: 8px; padding: 12px 16px; font-family: var(--mono); font-size: 14px; margin: 14px 0; }
+  footer { color: var(--muted); font-size: 13px; padding: 30px 56px 60px; max-width: 1400px; margin: 0 auto; border-top: 1px solid var(--line); }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+    nav.toc { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line); }
+    main { padding: 24px; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#overview">Overview &amp; principles</a></li>
+    <li><a href="#lifecycle">The universal write lifecycle</a></li>
+    <li><a href="#catalogue">Operation catalogue</a></li>
+    <li><a href="#double-entry">Double-entry &amp; balances</a></li>
+    <li><a href="#idempotency">Idempotency</a></li>
+    <li><a href="#bitemporal">Bitemporal model</a></li>
+    <li><a href="#concurrency">Concurrency &amp; transactions</a></li>
+    <li><a href="#holds">Holds &amp; approvals</a></li>
+    <li><a href="#batch">Batch execution</a></li>
+    <li><a href="#edge-cases">Edge cases &amp; failure modes</a></li>
+    <li><a href="#recommendations">Recommendations</a></li>
+  </ol>
+</nav>
+
+<main>
+<header class="title">
+  <h1>The Planner</h1>
+  <p class="sub">The single write path of the ledger — how every state change is validated, ordered, and durably recorded.</p>
+  <div class="meta">
+    Package <code>internal/planner/</code> &nbsp;·&nbsp; audience: engineers working on or integrating with the write path &nbsp;·&nbsp; altitude: architectural overview
+  </div>
+</header>
+
+<!-- 1 -->
+<section id="overview">
+  <h2 class="sec">1 · Overview &amp; principles</h2>
+  <p class="lead">The planner is the <b>write orchestrator</b>. Every mutation in the system — posting a transaction, authorizing a hold, reverting, amending metadata, inserting a schema — flows through exactly one of its <code>Submit*</code> methods. Reads never go through it; they query projections directly.</p>
+
+  <p>Four principles shape everything below:</p>
+  <table>
+    <thead><tr><th>Principle</th><th>What it means here</th></tr></thead>
+    <tbody>
+      <tr><td><b>Event sourcing</b></td><td>The append-only <code>log_events</code> table is the source of truth. Transactions, balances (volume deltas), holds, and metadata are <i>derived projections</i> written in the same transaction as the event.</td></tr>
+      <tr><td><b>Bitemporal</b></td><td>Every event and volume delta carries both <code>system_time</code> (when recorded) and <code>valid_time</code> (when it logically occurred). See §6.</td></tr>
+      <tr><td><b>Idempotency</b></td><td>A two-tier cache (Redis L1 + Postgres L2) lets a client safely retry a write without double-applying it. See §5.</td></tr>
+      <tr><td><b>Single write path</b></td><td>All consistency rules (balance checks, schema enforcement, sequence ordering) live in one place, so they cannot be bypassed.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Where the planner sits</h3>
+  <div class="mermaid">
+flowchart LR
+    client([Client]) --> api["gRPC / REST API<br/>(Submit RPC)"]
+    api -->|"EvaluatePolicy<br/>(Cedar, fail-closed)"| planner[["Planner<br/>(write orchestrator)"]]
+    planner --> pg[("PostgreSQL<br/>log_events + projections")]
+    planner --> redis[("Redis<br/>idempotency L1 + pub/sub")]
+    planner --> subs["Subscriptions<br/>(real-time streams)"]
+    worker["Worker (background)"] --> planner
+    worker -.->|"ExpireHolds /<br/>ExpireStaleApprovals"| pg
+    classDef core fill:#eef1fd,stroke:#3a5bd9,stroke-width:2px;
+    class planner core;
+  </div>
+
+  <p>The API layer authenticates the caller, runs the access policy, and unmarshals the protobuf request into typed planner inputs (<code>PostingInput</code>, <code>ConvertParams</code>, <code>BatchIntent</code>). The worker invokes the planner's background entry points on a ticker. Everything that changes state ends up calling the planner.</p>
+
+  <div class="callout note"><b>Dependencies.</b> The planner holds a <code>storage.Store</code>, a batch manager (current Merkle batch), a Redis idempotency cache, an event publisher, a policy evaluator, and a logger. They are injected via Uber Fx (<span class="fileref">planner.go</span>) and stored behind narrow interfaces so the package is unit-tested against an in-memory fake <code>Store</code>.</p></div>
+</section>
+
+<!-- 2 -->
+<section id="lifecycle">
+  <h2 class="sec">2 · The universal write lifecycle</h2>
+  <p class="lead">Almost every operation follows the same shape. Understanding this one flow means understanding 90% of the planner.</p>
+
+  <ol>
+    <li><b>Validate inputs</b> up front (so the idempotency hash never sees a nil amount).</li>
+    <li><b>Compute the idempotency hash</b> from the request fields (only if a key was supplied).</li>
+    <li><b>Check the ledger</b> exists and is not sealed.</li>
+    <li>Hand off to the shared wrapper <code>submitWithIdempotency</code>, which:
+      <ul>
+        <li>does the <b>2-tier idempotency lookup</b> (Redis → Postgres) and short-circuits on a hit;</li>
+        <li>opens a transaction inside <code>withDeadlockRetry</code>;</li>
+        <li>runs the operation's <code>do*InTx</code> core (the real work);</li>
+        <li><b>commits</b>, then populates the Redis cache and publishes the event;</li>
+        <li>on a concurrent same-key conflict, rolls back and re-reads the winner's record.</li>
+      </ul>
+    </li>
+  </ol>
+
+  <div class="mermaid">
+sequenceDiagram
+    autonumber
+    participant C as Caller
+    participant S as Submit*  (e.g. SubmitPost)
+    participant W as submitWithIdempotency
+    participant DB as Store / TxStore
+    participant R as Redis
+    C->>S: SubmitPost(postings, idempotencyKey, ...)
+    S->>S: validatePostings()  +  computeIdempotencyHash()
+    S->>DB: checkLedgerNotSealed()
+    S->>W: work = doPostInTx
+    alt idempotency key present
+        W->>R: GetIdempotencyKey (L1)
+        W->>DB: GetIdempotencyKey (L2, on L1 miss)
+        Note over W: hit → return cached EventID (IdempotentHit)
+    end
+    loop withDeadlockRetry (≤ maxDeadlockRetries)
+        W->>DB: BeginTx
+        W->>DB: doPostInTx — validate, balance check,<br/>appendEvent, insert tx + volume deltas + accounts
+        alt dryRun
+            W->>DB: Rollback (return result, no publish)
+        else
+            W->>DB: Commit
+            W->>R: SetIdempotencyKey (post-commit, best-effort)
+            W->>C: publishEvent → subscribers
+        end
+    end
+    Note over W: ErrIdempotencyKeyConflict →<br/>rollback, re-read winner → idempotent hit
+  </div>
+
+  <div class="callout ok"><b>Refactor.</b> Steps 4's wrapper (<code>submitWithIdempotency</code>) and the shared event writer (<code>appendEvent</code>) were extracted in this change. Previously each of the ~10 <code>Submit*</code> methods repeated the lookup / retry / commit / publish / conflict block and each <code>do*InTx</code> repeated the batch-id + sequence + <code>LogEventRecord</code> + append block. See §11.</div>
+
+  <h3>The two layers: <code>Submit*</code> vs <code>do*InTx</code></h3>
+  <p>Each operation is split in two:</p>
+  <ul>
+    <li><b><code>Submit*</code></b> owns the transaction lifecycle, idempotency, retry, and publish. It is the standalone entry point.</li>
+    <li><b><code>do*InTx</code></b> is the pure in-transaction core: it validates, checks balances, and writes the event plus projections against a <i>caller-supplied open transaction</i>. It never begins, commits, or rolls back.</li>
+  </ul>
+  <p>This split is what lets <b>batch</b> mode reuse the exact same business logic — it calls the <code>do*InTx</code> cores directly inside one shared transaction (see §9), so batched and standalone writes are validated identically.</p>
+</section>
+
+<!-- 3 -->
+<section id="catalogue">
+  <h2 class="sec">3 · Operation catalogue</h2>
+  <p class="lead">A single <code>Submit</code> RPC dispatches on operation type. Each maps to one event type (numerically aligned with the protobuf enum — <span class="fileref">storage/events.go</span>).</p>
+  <table>
+    <thead><tr><th>#</th><th>Event type</th><th>Operation</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td><code>TransactionPosted</code></td><td>post</td><td>Move funds via one or more postings; the core double-entry operation.</td></tr>
+      <tr><td>2</td><td><code>HoldCreated</code></td><td>authorize</td><td>Reserve funds on a source account (a hold / authorization).</td></tr>
+      <tr><td>3</td><td><code>HoldConfirmed</code></td><td>capture</td><td>Capture (fully or partially) an authorized hold, moving the funds.</td></tr>
+      <tr><td>4</td><td><code>HoldVoided</code></td><td>void</td><td>Release a hold without capturing it.</td></tr>
+      <tr><td>5</td><td><code>HoldExpired</code></td><td>(background)</td><td>Auto-expire a hold past its deadline (worker sweep).</td></tr>
+      <tr><td>6</td><td><code>ConversionCreated</code></td><td>convert</td><td>FX conversion: a zero-sum multi-leg transfer between two assets, with optional slippage.</td></tr>
+      <tr><td>7</td><td><code>TransactionReverted</code></td><td>revert</td><td>Post the direction-swapped reversal of an existing transaction; guards against double-revert.</td></tr>
+      <tr><td>8</td><td><code>TransactionAmended</code></td><td>amend</td><td>Overlay metadata changes on an existing transaction.</td></tr>
+      <tr><td>9</td><td><code>MetadataSet</code></td><td>set_metadata</td><td>Set metadata on an account or transaction.</td></tr>
+      <tr><td>10</td><td><code>MetadataDeleted</code></td><td>delete_metadata</td><td>Delete a metadata key; snapshots the post-deletion state to history.</td></tr>
+      <tr><td>11</td><td><code>SchemaInserted</code></td><td>insert_schema</td><td>Register a new chart-of-accounts schema version.</td></tr>
+      <tr><td>12</td><td><code>PolicyDenied</code></td><td>(audit)</td><td>Audit record written when a policy denies an actual execution attempt.</td></tr>
+      <tr><td>13</td><td><code>ApprovalRecorded</code></td><td>(audit)</td><td>Audit record written after an approved multi-sig intent executes.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- 4 -->
+<section id="double-entry">
+  <h2 class="sec">4 · Double-entry &amp; balance logic</h2>
+  <p class="lead">A posting moves an <code>amount</code> of an <code>asset</code> from a <code>source</code> to a <code>destination</code>. Direction is encoded by source→destination, never by the sign of the amount (amounts must be positive). <span class="fileref">operations_shared.go · doPostInTx</span></p>
+
+  <h3>Net per bucket</h3>
+  <p>A single post can carry many postings. The planner first nets them per <code>(account, asset)</code> bucket — building <code>netOutputs</code> (funds leaving) and <code>netInputs</code> (funds arriving). This lets one operation both debit and credit the same account and have it net out.</p>
+
+  <h3>The available-balance check</h3>
+  <p>For each <b>non-issuer</b> source bucket, the planner verifies funds are available — inside the transaction, so there is no time-of-check/time-of-use gap:</p>
+  <div class="formula">available = posted_input − posted_output − active_holds<br>require:&nbsp; available + net_input_to_bucket &nbsp;≥&nbsp; net_output_from_bucket</div>
+  <p><code>active_holds</code> is the sum of authorized-but-not-captured holds, so a posting cannot spend funds already reserved by an authorization. This same available-balance formula is shared (helper <code>availableBalance</code>) by authorize, convert, and revert.</p>
+
+  <div class="callout note"><b>Issuer accounts</b> (configured per ledger as <code>IssuerAccounts</code>, e.g. a <code>_world</code> account) <b>bypass the balance check</b> — they are allowed to go negative because they are where money enters and leaves the system.</div>
+
+  <h3>Volume deltas (the balance projection)</h3>
+  <p>Balances are not stored as a single mutable number. Each posting writes two append-only <code>volume_delta</code> rows:</p>
+  <ul>
+    <li>source: <code>OutputDelta = amount, InputDelta = 0</code></li>
+    <li>destination: <code>InputDelta = amount, OutputDelta = 0</code></li>
+  </ul>
+  <p>A balance is then <code>Σ InputDelta − Σ OutputDelta</code> over the deltas (optionally as-of a point in time — see §6). A separate checkpoint builder periodically rolls deltas up for O(1) reads; the planner itself only ever appends deltas.</p>
+
+  <div class="mermaid">
+flowchart TD
+    A["post: alice → bob, 100 USD"] --> B["net per (account,asset)"]
+    B --> C{"alice an issuer?"}
+    C -- no --> D["available(alice,USD) ≥ 100 ?"]
+    C -- yes --> E["skip check"]
+    D -- no --> F["ErrInsufficientFunds"]
+    D -- yes --> G["append TransactionPosted event"]
+    E --> G
+    G --> H["volume delta: alice OUT 100"]
+    G --> I["volume delta: bob IN 100"]
+    H --> J["upsert accounts, record tx"]
+    I --> J
+  </div>
+
+  <p><b>Conversions</b> are the multi-asset case: <code>doConvertInTx</code> writes a zero-sum 4-leg set of deltas (source asset out of source / into destination; destination asset out of destination / into source) plus an optional 2-leg slippage pair, and balance-checks the source for <code>source_amount + slippage</code>.</p>
+</section>
+
+<!-- 5 -->
+<section id="idempotency">
+  <h2 class="sec">5 · Idempotency</h2>
+  <p class="lead">A client may retry a request (timeout, network blip) without knowing whether the first attempt landed. An <code>idempotencyKey</code> makes the retry safe: the same key replays the same result instead of applying the write twice.</p>
+
+  <h3>Two tiers</h3>
+  <table>
+    <thead><tr><th>Tier</th><th>Store</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><b>L1</b></td><td>Redis (<code>ik:{ledger}:{key}</code>, 24h TTL)</td><td>Fast, non-authoritative cache. A Redis failure only degrades to a slower path — it never causes a wrong answer.</td></tr>
+      <tr><td><b>L2</b></td><td>Postgres (<code>UNIQUE(ledger_id, idempotency_key)</code>)</td><td>Authoritative. The unique constraint is also what makes concurrent same-key writes safe.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>The hash guards against key reuse</h3>
+  <p>The key alone is not enough: a client might reuse a key with <i>different</i> content. So the planner computes a SHA-256 hash over the request fields (ledger, reference, each posting's fields, sorted metadata, valid time) using a length-prefixed encoding so field boundaries are unambiguous and the hash is deterministic. On a key hit, the stored hash must match.</p>
+
+  <table>
+    <thead><tr><th>Lookup result</th><th>Hash</th><th>Outcome</th></tr></thead>
+    <tbody>
+      <tr><td>L1 or L2 hit</td><td>matches</td><td>Return cached <code>EventID</code> with <code>IdempotentHit = true</code> — no write.</td></tr>
+      <tr><td>L1 miss → L2 hit</td><td>matches</td><td>Populate L1, then return the hit.</td></tr>
+      <tr><td>hit</td><td><b>mismatch</b></td><td><code>ErrInvalidIdempotencyInput</code> — same key, different request.</td></tr>
+      <tr><td>both miss</td><td>—</td><td>Proceed to execute; the key is recorded inside the transaction.</td></tr>
+      <tr><td>Redis error</td><td>—</td><td>Log, fall through to L2 (authoritative). Degraded, not wrong.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>The concurrent-winner race</h3>
+  <p>Two requests with the same key can pass the lookup simultaneously (both see a miss). Both then try to insert the key inside their transactions. The Postgres unique constraint lets exactly one commit; the other's <code>AppendLogEvent</code>/insert fails with <code>ErrIdempotencyKeyConflict</code>. The losing request rolls back and re-reads the winner's committed record, returning it as an idempotent hit — so both callers get the same successful answer and the effect is applied once.</p>
+
+  <div class="mermaid">
+sequenceDiagram
+    participant A as Request A
+    participant B as Request B
+    participant DB as Postgres
+    A->>DB: lookup key → miss
+    B->>DB: lookup key → miss
+    A->>DB: BeginTx, insert key, Commit ✅
+    B->>DB: BeginTx, insert key → UNIQUE violation ❌
+    B->>DB: Rollback, re-read key → A's EventID
+    Note over B: returns IdempotentHit (same result as A)
+  </div>
+</section>
+
+<!-- 6 -->
+<section id="bitemporal">
+  <h2 class="sec">6 · Bitemporal model</h2>
+  <p class="lead">Every event and volume delta records <b>two</b> timelines, so the ledger can answer both "what happened" and "what did we know, and when".</p>
+  <table>
+    <thead><tr><th>Dimension</th><th>Set to</th><th>Answers</th></tr></thead>
+    <tbody>
+      <tr><td><code>system_time</code></td><td>always <code>time.Now()</code> at write</td><td>When did the ledger <i>record</i> this? (audit, ordering)</td></tr>
+      <tr><td><code>valid_time</code></td><td>caller-supplied, defaults to now</td><td>When did this <i>logically occur</i>? (effective date)</td></tr>
+    </tbody>
+  </table>
+  <p>Because <code>valid_time</code> is caller-controlled it may be in the past (<b>backdating</b> — e.g. booking a transaction with last week's effective date) or the future (<b>forward-dating</b> — scheduled settlement). A balance query can then ask "as of valid_time ≤ X" to reconstruct the books as they logically stood, or "as of system_time ≤ Y" to reconstruct what was known on a given day.</p>
+  <div class="callout note"><b>Revert at effective date.</b> A revert can be dated to the original transaction's <code>valid_time</code> (<code>atEffectiveDate</code>) rather than now, so the reversal appears in the same logical period as what it undoes. Holds, by contrast, always use <code>valid_time = now</code>.</div>
+</section>
+
+<!-- 7 -->
+<section id="concurrency">
+  <h2 class="sec">7 · Concurrency &amp; transactions</h2>
+
+  <h3>Per-ledger ordering via a row lock</h3>
+  <p>Each event gets a monotonic <code>ledger_seq</code>. <code>NextLedgerSeq</code> takes <code>SELECT … FOR UPDATE</code> on the ledger row, computes <code>MAX(seq)+1</code>, and so serializes sequence allocation per ledger. This is the system's main serialization point — and its main source of contention and deadlocks under concurrent writes to the same ledger.</p>
+
+  <div class="callout ok"><b>Refactor note.</b> The shared <code>appendEvent</code> helper now acquires the sequence at append time (after validation and balance reads) rather than at the very top of each core. This shortens the window the ledger row lock is held and is deadlock-safe — the only cross-operation shared lock is the ledger row, and hold operations grab their hold-row lock first either way.</div>
+
+  <h3>Bounded deadlock retry</h3>
+  <p>A serialization deadlock surfaces as <code>ErrDeadlock</code>. <code>withDeadlockRetry</code> retries the whole transaction up to <code>maxDeadlockRetries</code> times with exponential backoff + jitter (10ms → capped at 5s), aborting promptly if the context is cancelled. Non-deadlock errors are returned immediately.</p>
+
+  <h3>Hold row locks</h3>
+  <p>Capture, void, and expiry re-read the hold with <code>FOR UPDATE</code> inside the transaction and re-check its state (voided / expired / remaining amount) before acting. This makes the hold lifecycle race-free: a void and a capture on the same hold serialize, and the loser sees the updated state and fails cleanly.</p>
+
+  <h3>The atomic boundary</h3>
+  <p>Within one transaction the planner writes the event, the transaction/hold/conversion record, the volume deltas, account upserts, metadata history, relationships, and the idempotency key — <b>all or nothing</b>. Only <i>after</i> commit does it touch external, best-effort systems:</p>
+  <table>
+    <thead><tr><th>Inside the tx (durable, atomic)</th><th>After commit (best-effort, logged on failure)</th></tr></thead>
+    <tbody>
+      <tr><td>log event, projections, idempotency key</td><td>Redis cache population</td></tr>
+      <tr><td>balance checks, schema enforcement</td><td>event publish to subscribers</td></tr>
+    </tbody>
+  </table>
+  <p>A failure of a post-commit step never undoes the committed write — Postgres remains authoritative, and the Redis cache simply repopulates on the next lookup.</p>
+</section>
+
+<!-- 8 -->
+<section id="holds">
+  <h2 class="sec">8 · Holds &amp; approvals</h2>
+
+  <h3>Hold lifecycle</h3>
+  <p>A hold reserves funds (counted against available balance) without moving them. It can be captured (once or partially, up to the authorized amount), voided, or auto-expired by the background sweep.</p>
+  <div class="mermaid">
+stateDiagram-v2
+    [*] --> Authorized: SubmitAuthorize
+    Authorized --> Captured: SubmitCapture (≤ remaining)
+    Captured --> Captured: partial capture again
+    Authorized --> Voided: SubmitVoid
+    Authorized --> Expired: ExpireHolds (past deadline)
+    Captured --> [*]
+    Voided --> [*]
+    Expired --> [*]
+    note right of Expired
+      Worker sweep, re-reads under
+      FOR UPDATE; no-op if already
+      voided/expired
+    end note
+  </div>
+
+  <h3>Approval workflow (multi-sig)</h3>
+  <p>An intent can be parked for approval instead of executing immediately. Required approvers each sign; once all have signed, the intent executes exactly once. The flow is crash-safe via an <code>executing</code> intermediate state and a deterministic execution idempotency key.</p>
+  <div class="mermaid">
+stateDiagram-v2
+    [*] --> pending: SubmitForApproval
+    pending --> pending: Approve (not yet quorum)
+    pending --> executing: Approve (quorum reached)
+    executing --> executed: intent executed + audit event
+    executing --> expired: recovery sweep, no committed effect
+    executing --> executed_recovered: recovery sweep finds committed effect
+    pending --> expired: past deadline
+    pending --> rejected: deserialize / execute failure
+    note right of executing
+      Guarded transitions (UpdateApprovalStateIf)
+      prevent a recovery sweep and the live path
+      from clobbering each other.
+    end note
+  </div>
+  <div class="callout note"><b>Self-approval guard:</b> the submitter cannot approve their own intent. <b>Recovery:</b> an approval stuck in <code>executing</code> (process crashed mid-flight) is resolved by checking whether the financial effect actually committed — via the deterministic <code>approval:{intentID}</code> idempotency key recorded on the event — rather than blindly re-executing. This avoids both double-execution and wrongly expiring a real effect.</div>
+</section>
+
+<!-- 9 -->
+<section id="batch">
+  <h2 class="sec">9 · Batch execution</h2>
+  <p class="lead">A batch runs many intents together. Two modes trade atomicity against partial progress.</p>
+  <table>
+    <thead><tr><th>Mode</th><th>Transaction</th><th>On failure</th><th>Use when</th></tr></thead>
+    <tbody>
+      <tr><td><b>ALL_OR_NOTHING</b></td><td>One transaction for the whole batch; each intent runs via <code>executeIntentInTx</code> → <code>do*InTx</code>.</td><td>The entire batch rolls back; reports <code>FailedAt</code>.</td><td>The intents are interdependent and must commit together.</td></tr>
+      <tr><td><b>BEST_EFFORT</b></td><td>Each intent runs as its own standalone <code>Submit*</code> (its own transaction + retry).</td><td>That intent is marked failed; others proceed; per-intent results returned.</td><td>Intents are independent and partial success is acceptable.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout note"><b>Why the <code>do*InTx</code> split matters:</b> because ALL_OR_NOTHING calls the same cores as the standalone path, batched writes get the identical input + schema + balance validation. Batch events carry idempotency at the event level only (no per-intent key hash).</div>
+</section>
+
+<!-- 10 -->
+<section id="edge-cases">
+  <h2 class="sec">10 · Edge cases &amp; failure modes</h2>
+  <table>
+    <thead><tr><th>Case</th><th>Behavior</th></tr></thead>
+    <tbody>
+      <tr><td>Zero / negative / nil amount</td><td>Rejected up front by <code>validatePostings</code> (<code>amount must be positive</code>) — before any hash or transaction.</td></tr>
+      <tr><td>Empty posting list</td><td>Rejected (<code>at least one posting is required</code>).</td></tr>
+      <tr><td>Invalid account / asset</td><td>Rejected by <code>accounts.Validate</code> / <code>assets.Validate</code> (format + length).</td></tr>
+      <tr><td>Posting to a non-existent account</td><td>Allowed — accounts are auto-created (<code>UpsertAccount</code>) on first use.</td></tr>
+      <tr><td>Unbalanced postings</td><td>Allowed at the posting level; correctness is enforced per source via the available-balance check, and issuers absorb the imbalance.</td></tr>
+      <tr><td>Insufficient funds</td><td><code>ErrInsufficientFunds</code>, detected inside the tx before any write.</td></tr>
+      <tr><td>Sealed ledger</td><td>All writes rejected with <code>ErrLedgerSealed</code> (state constant <code>ledgerStateSealed</code>).</td></tr>
+      <tr><td>Duplicate transaction reference</td><td><code>ErrTransactionReferenceConflict</code> from the unique constraint.</td></tr>
+      <tr><td>Double revert</td><td><code>ErrAlreadyReverted</code> — detected via the reverts relationship before writing.</td></tr>
+      <tr><td>Capture on voided / expired / over-amount hold</td><td>Rejected (<code>ErrHoldVoided</code>, <code>ErrHoldExpired</code>, or insufficient-remaining), re-checked under the hold row lock.</td></tr>
+      <tr><td>Big amounts</td><td><code>math/big.Int</code> is arbitrary-precision (no overflow); the limit is the Postgres <code>numeric</code> column. <span class="pill todo">see recs</span></td></tr>
+      <tr><td>Malformed access policy</td><td><b>Fail-closed</b>: a stored policy that no longer parses blocks the operation rather than evaluating to allow.</td></tr>
+      <tr><td>Poison hold during expiry</td><td>The sweep stops a pass when it makes no progress, instead of hot-spinning; the next scheduled sweep retries.</td></tr>
+      <tr><td>Asset mismatch between a hold and its capture posting</td><td><b>Not currently validated.</b> <span class="pill todo">see recs</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- 11 -->
+<section id="recommendations">
+  <h2 class="sec">11 · Recommendations</h2>
+  <p class="lead">Findings from this review. The first four were <b>implemented in this change</b> (behavior-preserving internal refactors verified against the planner unit-test suite — see the diff: ~440 fewer lines). The rest are proposed follow-ups.</p>
+
+  <h3>Implemented</h3>
+  <table>
+    <thead><tr><th>Status</th><th>Change</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td><span class="pill impl">done</span></td><td><code>submitWithIdempotency</code> wrapper</td><td>The lookup → retry → commit → publish → conflict-resolution block was duplicated across ~10 <code>Submit*</code> methods. Now one wrapper; each method supplies only its hash, event type, and <code>do*InTx</code> closure.</td></tr>
+      <tr><td><span class="pill impl">done</span></td><td><code>appendEvent</code> helper</td><td>The batch-id + <code>NextLedgerSeq</code> + <code>LogEventRecord</code> + append block was repeated in every core. Centralizing it also makes <code>schemaVersionV1</code> a single source of truth and shortens the ledger-lock window.</td></tr>
+      <tr><td><span class="pill impl">done</span></td><td><code>availableBalance</code> / <code>checkSourceBalances</code></td><td>The "input − output − active holds" math lived inline in post, convert, authorize, and revert. Now one helper, consistently wrapped errors.</td></tr>
+      <tr><td><span class="pill impl">done</span></td><td>Named constants</td><td>Replaced hardcoded literals (<code>"sealed"</code>, deadlock retry count, <code>schema_enforcement</code> / <code>active_schema_version</code> feature keys, schema version) with package constants, per the project's "no hardcoded constants" rule.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout note"><b>One deliberate behavioral consolidation:</b> idempotency lookup now runs <i>after</i> the ledger/sealed check for <i>all</i> operations. Previously <code>post</code> alone looked up before that check; the unified order matches every other operation and is the more conservative choice (a replay on a now-sealed ledger is rejected rather than silently returning the cached hit). The approval audit writer intentionally keeps its own event construction — its event ID must stay stable across retries, which <code>appendEvent</code>'s fresh-ID-per-call would break.</div>
+
+  <h3>Proposed follow-ups</h3>
+  <table>
+    <thead><tr><th>Priority</th><th>Recommendation</th><th>Rationale</th></tr></thead>
+    <tbody>
+      <tr><td>Medium</td><td><b>Batch volume-delta and hold-expiry writes</b></td><td>A 100-posting transaction issues 200 individual <code>InsertVolumeDelta</code> calls; the expiry sweep opens one transaction per hold. Batched writes would cut round-trips materially.</td></tr>
+      <tr><td>Medium</td><td><b>Bound or document big-amount limits</b></td><td><code>big.Int</code> is unbounded in Go but the Postgres <code>numeric</code> column is not. Define and validate a max magnitude rather than failing at the storage layer.</td></tr>
+      <tr><td>Medium</td><td><b>Validate asset match on capture</b></td><td>Capture does not check that the hold's asset matches the implied posting asset. An explicit guard would close a correctness gap.</td></tr>
+      <tr><td>Medium</td><td><b>Add direct schema-enforcement and projection tests</b></td><td>Schema validation and volume-delta roll-up are exercised only indirectly. Targeted unit tests would lock in the contract.</td></tr>
+      <tr><td>Low</td><td><b>Metrics on AUDIT_GAP and deadlock-retry exhaustion</b></td><td>These are logged but not counted; a counter would surface operational health (e.g. approval audit trail gaps).</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</main>
+</div>
+<footer>
+  Generated for the <code>github.com/remade/ledger</code> planner. Diagrams rendered with Mermaid (CDN). Source of truth is the code under <code>internal/planner/</code> — treat any drift between this document and the code as a documentation bug.
+</footer>
+</body>
+</html>

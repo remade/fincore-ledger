@@ -6,6 +6,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	pb "github.com/remade/ledger/pkg/proto/ledger/v1"
 )
@@ -16,12 +17,48 @@ type Client struct {
 	ledger pb.LedgerServiceClient
 }
 
+// options collects the settings applied by Option values before New dials.
+type options struct {
+	bearerToken string
+	dialOpts    []grpc.DialOption
+}
+
+// Option configures a Client created by New.
+type Option func(*options)
+
+// WithBearerToken attaches the given JWT as an "authorization: Bearer <token>"
+// header on every unary and streaming RPC. The server always requires
+// authentication, so callers must supply a token.
+func WithBearerToken(token string) Option {
+	return func(o *options) { o.bearerToken = token }
+}
+
+// WithDialOptions appends raw gRPC dial options (e.g. custom transport
+// credentials). They are applied after the defaults, so a transport-credentials
+// option here overrides the default insecure credentials.
+func WithDialOptions(opts ...grpc.DialOption) Option {
+	return func(o *options) { o.dialOpts = append(o.dialOpts, opts...) }
+}
+
 // New creates a new SDK client connected to the given address.
-func New(addr string, opts ...grpc.DialOption) (*Client, error) {
-	if len(opts) == 0 {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+func New(addr string, opts ...Option) (*Client, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
 	}
-	conn, err := grpc.NewClient(addr, opts...)
+
+	// Default to insecure transport; a caller's WithDialOptions credentials,
+	// appended last, override it.
+	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	if o.bearerToken != "" {
+		dialOpts = append(dialOpts,
+			grpc.WithUnaryInterceptor(bearerUnaryInterceptor(o.bearerToken)),
+			grpc.WithStreamInterceptor(bearerStreamInterceptor(o.bearerToken)),
+		)
+	}
+	dialOpts = append(dialOpts, o.dialOpts...)
+
+	conn, err := grpc.NewClient(addr, dialOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to ledger at %s: %w", addr, err)
 	}
@@ -29,6 +66,27 @@ func New(addr string, opts ...grpc.DialOption) (*Client, error) {
 		conn:   conn,
 		ledger: pb.NewLedgerServiceClient(conn),
 	}, nil
+}
+
+// withBearer adds the bearer token to the outgoing gRPC metadata.
+func withBearer(ctx context.Context, token string) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
+}
+
+// bearerUnaryInterceptor injects the bearer token on every unary call. The req
+// and reply parameters are typed any to satisfy the grpc.UnaryClientInterceptor
+// signature.
+func bearerUnaryInterceptor(token string) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		return invoker(withBearer(ctx, token), method, req, reply, cc, opts...)
+	}
+}
+
+// bearerStreamInterceptor injects the bearer token on every streaming call.
+func bearerStreamInterceptor(token string) grpc.StreamClientInterceptor {
+	return func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+		return streamer(withBearer(ctx, token), desc, cc, method, opts...)
+	}
 }
 
 // Close closes the underlying connection.

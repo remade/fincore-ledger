@@ -7,6 +7,7 @@
 package ledgerv1
 
 import (
+	_ "github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2/options"
 	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
@@ -3529,14 +3530,14 @@ var File_ledger_v1_api_proto protoreflect.FileDescriptor
 
 const file_ledger_v1_api_proto_rawDesc = "" +
 	"\n" +
-	"\x13ledger/v1/api.proto\x12\tledger.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/api/annotations.proto\x1a\x12ledger/v1/ir.proto\x1a\x16ledger/v1/events.proto\x1a\x16ledger/v1/stream.proto\"\xc9\x01\n" +
+	"\x13ledger/v1/api.proto\x12\tledger.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/api/annotations.proto\x1a.protoc-gen-openapiv2/options/annotations.proto\x1a\x12ledger/v1/ir.proto\x1a\x16ledger/v1/events.proto\x1a\x16ledger/v1/stream.proto\"\xb9\x02\n" +
 	"\x13CreateLedgerRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tbucket_id\x18\x02 \x01(\tR\bbucketId\x12H\n" +
 	"\bmetadata\x18\x03 \x03(\v2,.ledger.v1.CreateLedgerRequest.MetadataEntryR\bmetadata\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\"\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01:n\x92Ak2i{\"id\":\"demo-ledger\",\"bucketId\":\"_default\",\"metadata\":{\"environment\":\"development\",\"owner\":\"finops-team\"}}\"\"\n" +
 	"\x10GetLedgerRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"P\n" +
 	"\x12ListLedgersRequest\x12\x1b\n" +
@@ -3547,9 +3548,9 @@ const file_ledger_v1_api_proto_rawDesc = "" +
 	"\aledgers\x18\x01 \x03(\v2\x11.ledger.v1.LedgerR\aledgers\x12&\n" +
 	"\x0fnext_page_token\x18\x02 \x01(\tR\rnextPageToken\"#\n" +
 	"\x11SealLedgerRequest\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\":\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\"\x9e\x02\n" +
 	"\rSubmitRequest\x12)\n" +
-	"\x06intent\x18\x01 \x01(\v2\x11.ledger.v1.IntentR\x06intent\"\x86\x04\n" +
+	"\x06intent\x18\x01 \x01(\v2\x11.ledger.v1.IntentR\x06intent:\xe1\x01\x92A\xdd\x012\xda\x01{\"intent\":{\"ledgerId\":\"demo-ledger\",\"reference\":\"fund-user-001\",\"idempotencyKey\":\"ik-fund-001\",\"operation\":{\"post\":{\"postings\":[{\"source\":\"_world\",\"destination\":\"users:001:wallet\",\"amount\":\"10000\",\"asset\":\"USD/2\"}]}}}}\"\xa2\x06\n" +
 	"\x0eSubmitResponse\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12%\n" +
 	"\x0eidempotent_hit\x18\x02 \x01(\bR\ridempotentHit\x122\n" +
@@ -3565,7 +3566,7 @@ const file_ledger_v1_api_proto_rawDesc = "" +
 	"conversion\x12;\n" +
 	"\fbatch_result\x18\x0e \x01(\v2\x16.ledger.v1.BatchResultH\x00R\vbatchResult\x12+\n" +
 	"\x06revert\x18\x0f \x01(\v2\x11.ledger.v1.RevertH\x00R\x06revert\x12(\n" +
-	"\x05amend\x18\x10 \x01(\v2\x10.ledger.v1.AmendH\x00R\x05amendB\b\n" +
+	"\x05amend\x18\x10 \x01(\v2\x10.ledger.v1.AmendH\x00R\x05amend:\x99\x02\x92A\x95\x022\x92\x02{\"eventId\":\"01JABCDEF0123456789ABCDEFG\",\"idempotentHit\":false,\"transaction\":{\"ledgerId\":\"demo-ledger\",\"transactionId\":\"01JABCDEF0123456789TXN001\",\"reference\":\"fund-user-001\",\"postings\":[{\"source\":\"_world\",\"destination\":\"users:001:wallet\",\"amount\":\"10000\",\"asset\":\"USD/2\"}]}}B\b\n" +
 	"\x06output\"\xd5\x01\n" +
 	"\x15GetTransactionRequest\x12\x1b\n" +
 	"\tledger_id\x18\x01 \x01(\tR\bledgerId\x12%\n" +
@@ -3672,11 +3673,11 @@ const file_ledger_v1_api_proto_rawDesc = "" +
 	"\vmerkle_root\x18\x02 \x01(\tR\n" +
 	"merkleRoot\x12\x1f\n" +
 	"\vevent_count\x18\x03 \x01(\x05R\n" +
-	"eventCount\"o\n" +
+	"eventCount\"\x87\x03\n" +
 	"\x13InsertSchemaRequest\x12\x1b\n" +
 	"\tledger_id\x18\x01 \x01(\tR\bledgerId\x12!\n" +
 	"\fschema_bytes\x18\x02 \x01(\fR\vschemaBytes\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\tR\aversion\"I\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion:\x95\x02\x92A\x91\x022\x8e\x02{\"ledgerId\":\"demo-ledger\",\"version\":\"v1\",\"schemaBytes\":\"eyJhY2NvdW50cyI6eyJ1c2VycyI6eyIkdXNlcl9pZCI6eyJ3YWxsZXQiOnsiLnNlbGYiOnt9fX19fSwiX3dvcmxkIjp7Ii5zZWxmIjp7fX0sIm1lcmNoYW50cyI6eyIkbWVyY2hhbnRfaWQiOnsiLnNlbGYiOnt9fX0sImZlZXMiOnsiJGZlZV90eXBlIjp7Ii5zZWxmIjp7fX19fX0=\"}\"I\n" +
 	"\x10GetSchemaRequest\x12\x1b\n" +
 	"\tledger_id\x18\x01 \x01(\tR\bledgerId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\"\x88\x01\n" +
@@ -3685,7 +3686,7 @@ const file_ledger_v1_api_proto_rawDesc = "" +
 	"\x04from\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\x04from\x12*\n" +
 	"\x02to\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x02to\"9\n" +
 	"\x0eImportResponse\x12'\n" +
-	"\x0fevents_imported\x18\x01 \x01(\x03R\x0eeventsImported\"\xdc\x03\n" +
+	"\x0fevents_imported\x18\x01 \x01(\x03R\x0eeventsImported\"\xed\x04\n" +
 	"\x06Ledger\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tbucket_id\x18\x02 \x01(\tR\bbucketId\x12\x14\n" +
@@ -3701,7 +3702,7 @@ const file_ledger_v1_api_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xcb\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01:\x8e\x01\x92A\x8a\x012\x87\x01{\"id\":\"demo-ledger\",\"bucketId\":\"_default\",\"state\":\"ACTIVE\",\"metadata\":{\"environment\":\"development\"},\"createdAt\":\"2026-01-15T10:00:00Z\"}\"\xcb\x03\n" +
 	"\vTransaction\x12\x1b\n" +
 	"\tledger_id\x18\x01 \x01(\tR\bledgerId\x12%\n" +
 	"\x0etransaction_id\x18\x02 \x01(\tR\rtransactionId\x12\x19\n" +
@@ -3774,14 +3775,14 @@ const file_ledger_v1_api_proto_rawDesc = "" +
 	"\x10metadata_changes\x18\x02 \x03(\v2%.ledger.v1.Amend.MetadataChangesEntryR\x0fmetadataChanges\x1a\\\n" +
 	"\x14MetadataChangesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12.\n" +
-	"\x05value\x18\x02 \x01(\v2\x18.ledger.v1.MetadataValueR\x05value:\x028\x01\"\xb3\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\x18.ledger.v1.MetadataValueR\x05value:\x028\x01\"\xae\x02\n" +
 	"\x06Schema\x12\x1b\n" +
 	"\tledger_id\x18\x01 \x01(\tR\bledgerId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x1a\n" +
 	"\bdocument\x18\x03 \x01(\fR\bdocument\x12;\n" +
 	"\vinserted_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"insertedAt\x12\x19\n" +
-	"\bevent_id\x18\x05 \x01(\tR\aeventId\"\xd9\x01\n" +
+	"\bevent_id\x18\x05 \x01(\tR\aeventId:y\x92Av2t{\"ledgerId\":\"demo-ledger\",\"version\":\"v1\",\"insertedAt\":\"2026-01-15T10:05:00Z\",\"eventId\":\"01JABCDEF0123456789SCHEMA1\"}\"\xd9\x01\n" +
 	"\fRelationship\x12 \n" +
 	"\fparent_tx_id\x18\x01 \x01(\tR\n" +
 	"parentTxId\x12\x1e\n" +
@@ -3846,14 +3847,16 @@ const file_ledger_v1_api_proto_rawDesc = "" +
 	"\aSETTLES\x10\x03\x12\v\n" +
 	"\aEXTENDS\x10\x04\x12\x0e\n" +
 	"\n" +
-	"REFERENCES\x10\x052\x9f\x17\n" +
-	"\rLedgerService\x12Y\n" +
-	"\fCreateLedger\x12\x1e.ledger.v1.CreateLedgerRequest\x1a\x11.ledger.v1.Ledger\"\x16\x82\xd3\xe4\x93\x02\x10:\x01*\"\v/v1/ledgers\x12U\n" +
+	"REFERENCES\x10\x052\x94\x1b\n" +
+	"\rLedgerService\x12v\n" +
+	"\fCreateLedger\x12\x1e.ledger.v1.CreateLedgerRequest\x1a\x11.ledger.v1.Ledger\"3\x92A\x1a\n" +
+	"\aLedgers\x12\x0fCreate a ledger\x82\xd3\xe4\x93\x02\x10:\x01*\"\v/v1/ledgers\x12U\n" +
 	"\tGetLedger\x12\x1b.ledger.v1.GetLedgerRequest\x1a\x11.ledger.v1.Ledger\"\x18\x82\xd3\xe4\x93\x02\x12\x12\x10/v1/ledgers/{id}\x12a\n" +
 	"\vListLedgers\x12\x1d.ledger.v1.ListLedgersRequest\x1a\x1e.ledger.v1.ListLedgersResponse\"\x13\x82\xd3\xe4\x93\x02\r\x12\v/v1/ledgers\x12\\\n" +
 	"\n" +
-	"SealLedger\x12\x1c.ledger.v1.SealLedgerRequest\x1a\x11.ledger.v1.Ledger\"\x1d\x82\xd3\xe4\x93\x02\x17\"\x15/v1/ledgers/{id}/seal\x12o\n" +
-	"\x06Submit\x12\x18.ledger.v1.SubmitRequest\x1a\x19.ledger.v1.SubmitResponse\"0\x82\xd3\xe4\x93\x02*:\x01*\"%/v1/ledgers/{intent.ledger_id}/submit\x12\x89\x01\n" +
+	"SealLedger\x12\x1c.ledger.v1.SealLedgerRequest\x1a\x11.ledger.v1.Ledger\"\x1d\x82\xd3\xe4\x93\x02\x17\"\x15/v1/ledgers/{id}/seal\x12\x84\x03\n" +
+	"\x06Submit\x12\x18.ledger.v1.SubmitRequest\x1a\x19.ledger.v1.SubmitResponse\"\xc4\x02\x92A\x90\x02\n" +
+	"\x06Writes\x12\x18Submit a write operation\x1a\xeb\x01Universal write endpoint. The intent's `operation` oneof selects the action: post, authorize, capture, void, convert, batch, revert, amend, set_metadata, delete_metadata, or insert_schema. Supply `idempotency_key` to make retries safe.\x82\xd3\xe4\x93\x02*:\x01*\"%/v1/ledgers/{intent.ledger_id}/submit\x12\x89\x01\n" +
 	"\x0eGetTransaction\x12 .ledger.v1.GetTransactionRequest\x1a\x16.ledger.v1.Transaction\"=\x82\xd3\xe4\x93\x027\x125/v1/ledgers/{ledger_id}/transactions/{transaction_id}\x12\x89\x01\n" +
 	"\x10ListTransactions\x12\".ledger.v1.ListTransactionsRequest\x1a#.ledger.v1.ListTransactionsResponse\",\x82\xd3\xe4\x93\x02&\x12$/v1/ledgers/{ledger_id}/transactions\x12r\n" +
 	"\n" +
@@ -3867,15 +3870,25 @@ const file_ledger_v1_api_proto_rawDesc = "" +
 	"\x10GetRelationships\x12\".ledger.v1.GetRelationshipsRequest\x1a#.ledger.v1.GetRelationshipsResponse\"K\x82\xd3\xe4\x93\x02E\x12C/v1/ledgers/{ledger_id}/transactions/{transaction_id}/relationships\x12w\n" +
 	"\rListLogEvents\x12\x1f.ledger.v1.ListLogEventsRequest\x1a .ledger.v1.ListLogEventsResponse\"#\x82\xd3\xe4\x93\x02\x1d\x12\x1b/v1/ledgers/{ledger_id}/log\x12q\n" +
 	"\vGetLogEvent\x12\x1d.ledger.v1.GetLogEventRequest\x1a\x13.ledger.v1.LogEvent\".\x82\xd3\xe4\x93\x02(\x12&/v1/ledgers/{ledger_id}/log/{event_id}\x12\x87\x01\n" +
-	"\vVerifyBatch\x12\x1d.ledger.v1.VerifyBatchRequest\x1a\x1e.ledger.v1.VerifyBatchResponse\"9\x82\xd3\xe4\x93\x023\"1/v1/ledgers/{ledger_id}/batches/{batch_id}/verify\x12m\n" +
-	"\fInsertSchema\x12\x1e.ledger.v1.InsertSchemaRequest\x1a\x11.ledger.v1.Schema\"*\x82\xd3\xe4\x93\x02$:\x01*\"\x1f/v1/ledgers/{ledger_id}/schemas\x12n\n" +
+	"\vVerifyBatch\x12\x1d.ledger.v1.VerifyBatchRequest\x1a\x1e.ledger.v1.VerifyBatchResponse\"9\x82\xd3\xe4\x93\x023\"1/v1/ledgers/{ledger_id}/batches/{batch_id}/verify\x12\xae\x02\n" +
+	"\fInsertSchema\x12\x1e.ledger.v1.InsertSchemaRequest\x1a\x11.ledger.v1.Schema\"\xea\x01\x92A\xbc\x01\n" +
+	"\aSchemas\x12!Insert a Chart of Accounts schema\x1a\x8d\x01`schema_bytes` is a base64-encoded JSON document defining the valid account paths. When schema enforcement is strict, postings must match it.\x82\xd3\xe4\x93\x02$:\x01*\"\x1f/v1/ledgers/{ledger_id}/schemas\x12n\n" +
 	"\tGetSchema\x12\x1b.ledger.v1.GetSchemaRequest\x1a\x11.ledger.v1.Schema\"1\x82\xd3\xe4\x93\x02+\x12)/v1/ledgers/{ledger_id}/schemas/{version}\x12\x8c\x01\n" +
 	"\x11SubmitForApproval\x12#.ledger.v1.SubmitForApprovalRequest\x1a$.ledger.v1.SubmitForApprovalResponse\",\x82\xd3\xe4\x93\x02&:\x01*\"!/v1/ledgers/{ledger_id}/approvals\x12\x94\x01\n" +
 	"\rApproveIntent\x12\x1f.ledger.v1.ApproveIntentRequest\x1a .ledger.v1.ApproveIntentResponse\"@\x82\xd3\xe4\x93\x02::\x01*\"5/v1/ledgers/{ledger_id}/approvals/{intent_id}/approve\x12\x92\x01\n" +
 	"\x14ListPendingApprovals\x12&.ledger.v1.ListPendingApprovalsRequest\x1a'.ledger.v1.ListPendingApprovalsResponse\")\x82\xd3\xe4\x93\x02#\x12!/v1/ledgers/{ledger_id}/approvals\x12H\n" +
 	"\tSubscribe\x12\x1b.ledger.v1.SubscribeRequest\x1a\x1c.ledger.v1.SubscriptionEvent0\x01\x12a\n" +
 	"\x06Export\x12\x18.ledger.v1.ExportRequest\x1a\x13.ledger.v1.LogEvent\"&\x82\xd3\xe4\x93\x02 \x12\x1e/v1/ledgers/{ledger_id}/export0\x01\x12:\n" +
-	"\x06Import\x12\x13.ledger.v1.LogEvent\x1a\x19.ledger.v1.ImportResponse(\x01B7Z5github.com/remade/ledger/pkg/proto/ledger/v1;ledgerv1b\x06proto3"
+	"\x06Import\x12\x13.ledger.v1.LogEvent\x1a\x19.ledger.v1.ImportResponse(\x01B\xa1\x04\x92A\xe6\x03\x12\x96\x02\n" +
+	"\n" +
+	"Ledger API\x12\xf4\x01Programmable double-entry accounting engine. An append-only event log is the source of truth, with derived projections for balances and transactions. All writes flow through the universal submit endpoint (`POST /v1/ledgers/{ledger_id}/submit`).\"\f\n" +
+	"\n" +
+	"Ledger API2\x031.0*\x02\x01\x022\x10application/json:\x10application/jsonZ\x94\x01\n" +
+	"\x91\x01\n" +
+	"\x06Bearer\x12\x86\x01\b\x02\x12qJWT bearer token. Send as `Authorization: Bearer <token>`. The token's `ledgers` claim governs per-ledger access.\x1a\rAuthorization \x02b\f\n" +
+	"\n" +
+	"\n" +
+	"\x06Bearer\x12\x00Z5github.com/remade/ledger/pkg/proto/ledger/v1;ledgerv1b\x06proto3"
 
 var (
 	file_ledger_v1_api_proto_rawDescOnce sync.Once

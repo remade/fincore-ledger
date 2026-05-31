@@ -12,9 +12,14 @@ import (
 var client *sdk.Client
 
 // requireClient returns a PersistentPreRunE that establishes the SDK connection.
+// The server always requires authentication, so a bearer token must be supplied
+// via --token or LEDGER_TOKEN.
 func requireClient() func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
-		c, err := sdk.New(serverAddr)
+		if authToken == "" {
+			return fmt.Errorf("a bearer token is required: set --token or LEDGER_TOKEN (get one via 'make dev-token')")
+		}
+		c, err := sdk.New(serverAddr, sdk.WithBearerToken(authToken))
 		if err != nil {
 			return fmt.Errorf("connecting to %s: %w", serverAddr, err)
 		}

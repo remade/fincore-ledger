@@ -29,6 +29,7 @@ func TestSplitCSV(t *testing.T) {
 }
 
 func TestNew_AdminPrincipalsParsed(t *testing.T) {
+	t.Setenv("LEDGER_AUTH_JWKS_URL", "https://issuer.example.com/.well-known/jwks.json")
 	t.Setenv("LEDGER_AUTH_ADMIN_PRINCIPALS", "ops-admin, billing ")
 	cfg, err := New(nil)
 	if err != nil {
@@ -50,6 +51,8 @@ func TestNew_Defaults(t *testing.T) {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
 	}
+	// Authentication is always required, so a JWKS URL must be configured.
+	t.Setenv("LEDGER_AUTH_JWKS_URL", "https://issuer.example.com/.well-known/jwks.json")
 
 	cfg, err := New(nil)
 	if err != nil {
@@ -86,8 +89,7 @@ func TestNew_EnvVarsOverrideDefaults(t *testing.T) {
 	t.Setenv("LEDGER_GRPC_PORT", "9999")
 	t.Setenv("LEDGER_LOG_LEVEL", "debug")
 	t.Setenv("LEDGER_ENVIRONMENT", "production")
-	// Production requires authentication to be configured.
-	t.Setenv("LEDGER_AUTH_ENABLED", "true")
+	// Authentication is always required; production also forces an https JWKS URL.
 	t.Setenv("LEDGER_AUTH_JWKS_URL", "https://issuer.example.com/.well-known/jwks.json")
 
 	cfg, err := New(nil)
@@ -108,6 +110,7 @@ func TestNew_EnvVarsOverrideDefaults(t *testing.T) {
 
 func TestNew_FlagsOverrideEnvVars(t *testing.T) {
 	t.Setenv("LEDGER_GRPC_PORT", "7777")
+	t.Setenv("LEDGER_AUTH_JWKS_URL", "https://issuer.example.com/.well-known/jwks.json")
 
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	RegisterFlags(fs)
@@ -137,6 +140,7 @@ func TestNew_DotEnvFile(t *testing.T) {
 	// Clear env vars so .env values are visible.
 	os.Unsetenv("LEDGER_GRPC_PORT")
 	os.Unsetenv("LEDGER_LOG_LEVEL")
+	t.Setenv("LEDGER_AUTH_JWKS_URL", "https://issuer.example.com/.well-known/jwks.json")
 
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	RegisterFlags(fs)
@@ -184,18 +188,13 @@ func TestNew_ValidationErrors(t *testing.T) {
 			wantErr: "log_level must be one of",
 		},
 		{
-			name:    "production requires auth enabled",
-			envVars: map[string]string{"LEDGER_ENVIRONMENT": "production"},
-			wantErr: "auth.enabled must be true",
-		},
-		{
-			name:    "auth enabled requires jwks url",
-			envVars: map[string]string{"LEDGER_AUTH_ENABLED": "true"},
+			name:    "auth requires jwks url",
+			envVars: map[string]string{},
 			wantErr: "auth.jwks_url is required",
 		},
 		{
 			name:    "auth method must be jwt",
-			envVars: map[string]string{"LEDGER_AUTH_ENABLED": "true", "LEDGER_AUTH_METHOD": "mtls", "LEDGER_AUTH_JWKS_URL": "https://x/jwks"},
+			envVars: map[string]string{"LEDGER_AUTH_METHOD": "mtls", "LEDGER_AUTH_JWKS_URL": "https://x/jwks"},
 			wantErr: `auth.method must be "jwt"`,
 		},
 		{
@@ -205,7 +204,7 @@ func TestNew_ValidationErrors(t *testing.T) {
 		},
 		{
 			name:    "rate limit enabled requires positive rps",
-			envVars: map[string]string{"LEDGER_RATE_LIMIT_ENABLED": "true"},
+			envVars: map[string]string{"LEDGER_RATE_LIMIT_ENABLED": "true", "LEDGER_AUTH_JWKS_URL": "https://issuer.example.com/jwks.json"},
 			wantErr: "rate_limit.read_rps and rate_limit.write_rps must be positive",
 		},
 	}
@@ -249,6 +248,7 @@ func TestNew_EmptyRequiredValueViaFlag(t *testing.T) {
 }
 
 func TestNew_WorkerIntervalFromEnv(t *testing.T) {
+	t.Setenv("LEDGER_AUTH_JWKS_URL", "https://issuer.example.com/.well-known/jwks.json")
 	t.Setenv("LEDGER_WORKER_BATCH_CLOSE_INTERVAL", "10s")
 	t.Setenv("LEDGER_WORKER_CHECKPOINT_INTERVAL", "1m")
 	t.Setenv("LEDGER_WORKER_STUCK_APPROVAL_THRESHOLD", "2m")
